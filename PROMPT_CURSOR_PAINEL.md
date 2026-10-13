@@ -14,7 +14,7 @@ Fluxo: NinjaTrader (TCP :5556) → engine Python incremental → `signal_state.j
 - Estado atual já commitado no `main` (commit `0f728bb`). Parta dele.
 
 ## Como o painel está organizado hoje
-- Barra compacta no topo: título, status LIVE, etiqueta do sinal composto, horário (Brasília) e 5 blocos (Preço, Sessão, Regime IA, Grid pausado, Thresholds).
+- Barra compacta no topo: título, status LIVE, etiqueta do sinal composto, horário (Brasília) e 5 blocos (Preço, Sessão, Regime IA, Sinal pausado, Thresholds).
 - Seletor de tema (5 paletas escuras) na tela principal, canto direito do cabeçalho.
 - Abas: **Operação** (multi-timeframe + footprint), **Gráficos** (preço 10m + sinais), **Log de sinais**.
 - Footprint: botões de timeframe `10m / 30m / 1H`, card de leitura com etiqueta do timeframe, blocos de números e gráfico de net MF por preço.

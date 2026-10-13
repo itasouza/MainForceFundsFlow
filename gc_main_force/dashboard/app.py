@@ -129,9 +129,9 @@ with st.sidebar.expander("IA — Regime / Kill Switch", expanded=False):
         else int(_controls.get("force_regime", 1)) + 1,
     )
     pause_grid = st.toggle(
-        "Pausar grid (override)",
+        "Pausar sinal (override)",
         value=bool(_controls.get("pause_grid", False)),
-        help="Kill switch humano: força pausa de novas entradas independentemente da IA.",
+        help="Kill switch humano: força pausa do sinal / novas entradas independentemente da IA.",
     )
     if st.button("Aplicar controles IA"):
         force_regime = None if force_opt.startswith("auto") else int(force_opt[0])
@@ -263,7 +263,7 @@ tiles = "".join(
         _tile("Preço GC", px_html),
         _tile("Sessão (ET)", str(state.get("active_session") or "—").upper(), f"{state.get('tick_count', 0)} ticks"),
         _tile("Regime IA", regime_txt, f"fonte: {regime.get('source', '—')}"),
-        _tile("Grid pausado", grid_html, f"MF floor {thr.get('mf_fixed_threshold_contracts', '—')} cts"),
+        _tile("Sinal pausado", grid_html, f"MF floor {thr.get('mf_fixed_threshold_contracts', '—')} cts"),
         _tile("Thresholds", thr_txt),
     ]
 )

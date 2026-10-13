@@ -14,7 +14,7 @@ import streamlit as st
 SIGNAL_LABELS = {
     1: ("LONG BIAS", "#16a34a"),
     -1: ("SHORT BIAS", "#dc2626"),
-    0: ("NEUTRAL — PAUSE GRID", "#6b7280"),
+    0: ("NEUTRAL — PAUSE SINAL", "#6b7280"),
 }
 
 
