@@ -176,6 +176,171 @@ def build_price_chart(bars: list[dict], signal_log: list[dict]) -> go.Figure:
     return fig
 
 
+def build_institutional_footprint_chart(
+    primary: dict[str, Any] | None,
+    *,
+    context_30m: dict[str, Any] | None = None,
+    tf_label: str = "10m",
+) -> go.Figure:
+    """
+    Horizontal net-MF volume by price (last closed bar).
+
+    Green = net buying; red = net selling. Optional lighter 30m overlay for context.
+    """
+    fig = go.Figure()
+    primary = primary or {}
+    levels = list(primary.get("price_levels") or [])
+    nets = list(primary.get("net_mf_vol") or [])
+    buys = list(primary.get("mf_buy_vol") or [])
+    sells = list(primary.get("mf_sell_vol") or [])
+    high = primary.get("high")
+    low = primary.get("low")
+
+    if not levels or not nets:
+        fig.update_layout(
+            title=f"Sem footprint MF na última barra {tf_label}",
+            height=380,
+            template="plotly_dark",
+            margin=dict(l=20, r=20, t=40, b=20),
+        )
+        return fig
+
+    colors = ["#16a34a" if n >= 0 else "#dc2626" for n in nets]
+    hover = [
+        (
+            f"${lv:.2f}<br>Net: {n:+.0f}<br>Buy: {b:.0f} · Sell: {s:.0f}"
+        )
+        for lv, n, b, s in zip(
+            levels,
+            nets,
+            buys if len(buys) == len(levels) else [0.0] * len(levels),
+            sells if len(sells) == len(levels) else [0.0] * len(levels),
+        )
+    ]
+    fig.add_trace(
+        go.Bar(
+            y=levels,
+            x=nets,
+            orientation="h",
+            marker_color=colors,
+            name=f"Net MF {tf_label}",
+            hovertext=hover,
+            hoverinfo="text",
+            text=[f"{n:+.0f}" for n in nets],
+            textposition="outside",
+        )
+    )
+
+    # Lighter 30m context (when primary is not already 30m)
+    if context_30m and tf_label != "30m":
+        c_levels = list(context_30m.get("price_levels") or [])
+        c_nets = list(context_30m.get("net_mf_vol") or [])
+        if c_levels and c_nets:
+            fig.add_trace(
+                go.Bar(
+                    y=c_levels,
+                    x=c_nets,
+                    orientation="h",
+                    marker_color="rgba(148, 163, 184, 0.35)",
+                    name="Net MF 30m (contexto)",
+                    hoverinfo="skip",
+                    opacity=0.55,
+                )
+            )
+
+    abs_level = primary.get("absorption_level")
+    abs_vol = float(primary.get("absorption_volume") or 0.0)
+    if abs_level is not None:
+        # Price on Y → horizontal guide at absorption (annotation uses $ price)
+        fig.add_hline(
+            y=float(abs_level),
+            line_dash="dash",
+            line_color="#fbbf24",
+            annotation_text=f"Nível de Absorção: ${float(abs_level):.2f}",
+            annotation_position="top right",
+            annotation_font=dict(color="#fbbf24", size=12),
+        )
+
+    y0 = float(low) if low is not None else min(levels)
+    y1 = float(high) if high is not None else max(levels)
+    pad = max(0.2, (y1 - y0) * 0.08 if y1 > y0 else 0.5)
+    fig.update_layout(
+        title=f"🐉 Rastro Institucional ({tf_label}) — net MF por preço",
+        height=440,
+        template="plotly_dark",
+        margin=dict(l=20, r=40, t=50, b=20),
+        xaxis_title="Net Main Force (contratos)",
+        yaxis_title="Preço GC",
+        yaxis=dict(range=[y0 - pad, y1 + pad]),
+        barmode="overlay",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        bargap=0.12,
+    )
+    if abs_level is not None and abs_vol != 0:
+        fig.add_annotation(
+            x=0,
+            y=float(abs_level),
+            text=f"{abs_vol:+.0f} cts",
+            showarrow=False,
+            font=dict(color="#fbbf24", size=11),
+            xanchor="left",
+            yshift=10,
+        )
+    return fig
+
+
+def render_mf_footprint_section(
+    footprint_bundle: dict[str, Any] | None,
+    *,
+    selected_tf: str = "10m",
+) -> None:
+    """
+    Dashboard block: institutional footprint + grid decision table.
+
+    ``footprint_bundle`` = {\"10m\": {...}, \"30m\": {...}, \"1H\": {...}} from state/payload.
+    """
+    st.subheader("🐉 Rastro Institucional (Footprint de Grandes Lotes)")
+    st.caption(
+        "Onde e com que agressão o dinheiro grande está entrando? "
+        "(proxy de preço/volume MF no CME — sem seats de corretora.)"
+    )
+    bundle = footprint_bundle or {}
+    primary = bundle.get(selected_tf) or {}
+    ctx30 = bundle.get("30m") or {}
+
+    abs_level = primary.get("absorption_level")
+    abs_vol = float(primary.get("absorption_volume") or 0.0)
+    if abs_level is not None and abs_vol != 0:
+        side = "compra (suporte)" if abs_vol > 0 else "venda (resistência)"
+        st.markdown(
+            f"**Nível de Absorção: `${float(abs_level):.2f}` "
+            f"({abs_vol:+.0f} contratos net — {side})** · TF `{selected_tf}`"
+        )
+    else:
+        st.info("Sem absorção MF na última barra fechada deste TF — fluxo ainda sem nó claro.")
+
+    fig = build_institutional_footprint_chart(
+        primary, context_30m=ctx30, tf_label=selected_tf
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Como interpretar o Footprint para o Grid", expanded=False):
+        st.markdown(
+            """
+| Cenário | Ação no Grid |
+|---|---|
+| Absorção **positiva** (compra) **abaixo** do preço | ✅ Grid de compra — há “chão” institucional |
+| Absorção **negativa** (venda) **acima** do preço | ✅ Grid de venda — há “teto” institucional |
+| Compra embaixo + venda em cima | ⚠️ Range — grid conservador, lotes menores |
+| Sem nó claro / volume espalhado | ❌ Pausar grid — falta convicção institucional |
+
+**Pontos de atenção:** não coloque limites **exatamente** no `absorption_level`
+(desloque 2–4 ticks de $0.10). O campo JSON `institutional_footprint` é o contrato
+para a Strategy / EA futura.
+            """
+        )
+
+
 def signal_log_table(log: list[dict]) -> pd.DataFrame:
     if not log:
         return pd.DataFrame()

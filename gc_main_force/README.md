@@ -72,8 +72,19 @@ python -m python_engine.main --mode live
 
 Por padrão usa o **engine incremental** (`live_engine: incremental` em `config.py`):
 - **O(1)** por tick (sem reprocessar o buffer inteiro)
-- Disco: heartbeat ~5s + gravação completa a cada **fechamento 10m**
+- Disco: heartbeat ~2s + sinal a cada **fechamento 10m**
+- **IA de regime** (inferência only) no **fechamento 1H** → atualiza `PARAM_PROFILES`
 - Fallback legado: `"live_engine": "batch"`
+
+### Treinar modelo de regime (offline — nunca no live)
+
+```bash
+pip install -r requirements.txt
+python train_regime_model.py
+python train_regime_model.py --csv backtest/sample_data/gc_ticks_sample.csv
+```
+
+Gera `models/regime_rf.joblib`. No painel: **IA — Regime / Kill Switch** (forçar regime ou pausar grid).
 
 - SUB ticks: `tcp://localhost:5556`
 - PUB sinais: `tcp://*:5555` (tópico `gold_mtf_flow`)

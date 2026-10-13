@@ -17,6 +17,7 @@ if str(_ROOT) not in sys.path:
 from dashboard.components import (
     build_price_chart,
     render_divergence,
+    render_mf_footprint_section,
     render_price_line,
     render_signal_panel,
     render_status_header,
@@ -24,7 +25,8 @@ from dashboard.components import (
     signal_log_table,
 )
 from python_engine.config import get_config
-from python_engine.main import compute_signals_from_ticks
+from python_engine.incremental_engine import run_incremental_on_ticks
+from python_engine.regime_classifier import load_ai_controls, save_ai_controls
 from python_engine.signal_engine import active_session
 from python_engine.state_store import EngineStateStore
 from python_engine.tick_receiver import load_ticks_csv
@@ -50,26 +52,18 @@ def filter_log_by_session(log: list[dict], session_filter: str) -> list[dict]:
 
 
 def run_local_backtest(csv_bytes: bytes, overrides: dict) -> dict:
+    """Replay CSV via incremental engine so institutional_footprint matches live."""
     tmp = _ROOT / "_upload_ticks.csv"
     tmp.write_bytes(csv_bytes)
     ticks = load_ticks_csv(tmp)
     local_cfg = get_config(overrides)
-    payloads, all_bars = compute_signals_from_ticks(ticks, local_cfg)
-    bars = []
-    b10 = all_bars["10m"].tail(int(local_cfg["chart_bars_display"]))
-    for ts, row in b10.iterrows():
-        bars.append(
-            {
-                "timestamp": pd.Timestamp(ts).isoformat(),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["volume"]),
-                "mf_delta_norm": float(row["mf_delta_norm"]),
-                "retail_delta_norm": float(row["retail_delta_norm"]),
-            }
-        )
+    payloads: list[dict] = []
+    engine = run_incremental_on_ticks(
+        ticks,
+        local_cfg,
+        on_signal=lambda p: payloads.append(p),
+    )
+    snap = engine.snapshot_state()
     for p in payloads:
         p["session"] = active_session(pd.Timestamp(p["timestamp"]), local_cfg["sessions"])
     return {
@@ -80,8 +74,13 @@ def run_local_backtest(csv_bytes: bytes, overrides: dict) -> dict:
         "session_open_price": float(ticks["price"].iloc[0]) if len(ticks) else None,
         "latest_signal": payloads[-1] if payloads else None,
         "signal_log": payloads[-50:],
-        "bars_10m": bars,
+        "bars_10m": snap.get("bars_10m") or [],
+        "institutional_footprint": snap.get("institutional_footprint")
+        or ((payloads[-1].get("institutional_footprint") if payloads else None) or {}),
         "active_session": payloads[-1].get("session") if payloads else None,
+        "engine": "incremental",
+        "regime": snap.get("regime"),
+        "thresholds": snap.get("thresholds"),
     }
 
 
@@ -98,6 +97,45 @@ thr_30 = st.sidebar.slider("Threshold 30m", 0.05, 0.50, float(cfg["threshold_30m
 thr_10 = st.sidebar.slider("Threshold 10m", 0.05, 0.60, float(cfg["threshold_10m"]), 0.01)
 roll_h = st.sidebar.slider("Janela percentil (horas)", 1, 48, int(cfg["rolling_window_hours"]))
 pause = st.sidebar.checkbox("Pausar atualizações ao vivo", value=False)
+show_footprint = st.sidebar.toggle(
+    "Mostrar Rastro Institucional",
+    value=True,
+    help="Footprint MF por preço (última barra fechada) — onde o dinheiro grande agride.",
+)
+footprint_tf = st.sidebar.selectbox(
+    "Timeframe do Footprint",
+    options=["10m", "30m", "1H"],
+    index=0,
+)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("IA — Regime / Kill Switch")
+AI_CONTROLS_PATH = _ROOT / str(cfg.get("ai_controls_file", "ai_controls.json"))
+_controls = load_ai_controls(AI_CONTROLS_PATH)
+ai_enabled = st.sidebar.toggle("IA de regime ativa", value=bool(_controls.get("ai_enabled", True)))
+force_opt = st.sidebar.selectbox(
+    "Forçar regime manual",
+    options=["auto", "0 — Chop", "1 — Standard/Trend", "2 — High Vol/News"],
+    index=0
+    if _controls.get("force_regime") is None
+    else int(_controls.get("force_regime", 1)) + 1,
+)
+pause_grid = st.sidebar.toggle(
+    "Pausar grid (override)",
+    value=bool(_controls.get("pause_grid", False)),
+    help="Kill switch humano: força pausa de novas entradas independentemente da IA.",
+)
+if st.sidebar.button("Aplicar controles IA"):
+    force_regime = None if force_opt.startswith("auto") else int(force_opt[0])
+    save_ai_controls(
+        AI_CONTROLS_PATH,
+        {
+            "ai_enabled": ai_enabled,
+            "force_regime": force_regime,
+            "pause_grid": pause_grid,
+        },
+    )
+    st.sidebar.success("Controles salvos — aplicados no próximo fechamento 1H.")
 
 session_filter = st.sidebar.selectbox(
     "Filtro de sessão",
@@ -143,8 +181,13 @@ with c1:
     render_status_header(state)
     if state.get("live") and not state.get("latest_signal"):
         st.info(
-            "Recebendo ticks do NinjaTrader. Aguarde o fechamento de barras 10m "
-            "(e depois 30m/1H) para o sinal composto completo."
+            "Recebendo ticks do NinjaTrader. O sinal composto aparece após o "
+            "fechamento da primeira barra 10m (e alinhamento 30m/1H)."
+        )
+    if not state.get("live") and (state.get("tick_count") or 0) == 0:
+        st.warning(
+            "Sem ticks no estado. Confirme no Ninja: indicador GC Tick Publisher (TCP) "
+            "com LISTENING e tps>0, e o engine Python em modo live."
         )
 with c2:
     render_price_line(state)
@@ -152,6 +195,22 @@ with c3:
     sess = state.get("active_session") or "—"
     st.metric("Sessão ativa (ET)", str(sess).upper())
     st.caption(f"Ticks buffer: {state.get('tick_count', 0)}")
+
+regime = state.get("regime") or {}
+thr = state.get("thresholds") or {}
+r1, r2, r3 = st.columns(3)
+with r1:
+    rid = regime.get("regime", "—")
+    st.metric("Regime IA", f"{rid} · {regime.get('label', '—')}")
+    st.caption(f"Fonte: {regime.get('source', '—')}")
+with r2:
+    st.metric("Grid pausado", "SIM" if thr.get("grid_paused") else "NÃO")
+    st.caption(f"MF floor: {thr.get('mf_fixed_threshold_contracts', '—')} cts")
+with r3:
+    st.metric(
+        "Thresholds ativos",
+        f"1H {thr.get('threshold_1h', '—')} | 30m {thr.get('threshold_30m', '—')} | 10m {thr.get('threshold_10m', '—')}",
+    )
 
 st.divider()
 
@@ -164,6 +223,12 @@ with right:
 
 st.subheader("Análise Multi-Timeframe")
 render_tf_columns(latest)
+
+if show_footprint:
+    fp_bundle = state.get("institutional_footprint")
+    if not fp_bundle and latest:
+        fp_bundle = latest.get("institutional_footprint")
+    render_mf_footprint_section(fp_bundle, selected_tf=footprint_tf)
 
 st.subheader("Preço GC (10m) + marcadores de sinal")
 fig = build_price_chart(list(state.get("bars_10m") or []), log)

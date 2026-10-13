@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 import zmq
 
+# pandas used in regime test timestamps
+
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -62,8 +64,12 @@ def test_incremental_engine() -> None:
     engine = IncrementalMTFEngine(cfg)
     ticks = generate_synthetic_ticks(hours=6)
     signals = 0
+    closes_1h = 0
     for row in ticks.to_dict(orient="records"):
-        payload = engine.process_tick(row)
+        result = engine.process_tick(row)
+        if result.closed_1h is not None:
+            closes_1h += 1
+        payload = result.signal_payload
         if payload is not None:
             signals += 1
             assert payload["composite_signal"] in (-1, 0, 1)
@@ -73,7 +79,53 @@ def test_incremental_engine() -> None:
     snap = engine.snapshot_state()
     assert snap["engine"] == "incremental" or snap.get("tick_count", 0) > 0
     assert snap["last_price"] is not None
-    print("OK incremental:", engine.tick_count, "ticks,", signals, "10m closes,", len(engine.history_bars["10m"]), "bars")
+    assert "institutional_footprint" in snap
+    bundle = snap["institutional_footprint"]
+    assert set(bundle.keys()) >= {"10m", "30m", "1H"}
+    fp10 = bundle["10m"]
+    assert "price_levels" in fp10 and "net_mf_vol" in fp10
+    assert "absorption_level" in fp10 and "absorption_volume" in fp10
+    closed = engine.history_bars["10m"][-1]
+    assert "institutional_footprint" in closed
+    assert "mf_buy_profile" in closed and "mf_sell_profile" in closed
+    print(
+        "OK incremental:",
+        engine.tick_count,
+        "ticks,",
+        signals,
+        "10m closes,",
+        closes_1h,
+        "1H closes,",
+        len(engine.history_bars["10m"]),
+        "bars,",
+        "fp_levels=",
+        len(fp10.get("price_levels") or []),
+        "abs=",
+        fp10.get("absorption_level"),
+    )
+
+
+def test_regime_classifier_fallback() -> None:
+    from python_engine.regime_classifier import MarketRegimeClassifier
+
+    cfg = get_config()
+    clf = MarketRegimeClassifier(model_path=None)
+    bar = {
+        "bar_start_time": pd.Timestamp("2026-10-13T14:00:00Z"),
+        "open": 4200.0,
+        "high": 4205.0,
+        "low": 4198.0,
+        "close": 4202.0,
+        "mf_delta_norm": 0.4,
+        "retail_delta_norm": -0.2,
+    }
+    decision = clf.on_1h_close(bar, cfg, {"ai_enabled": True, "force_regime": None})
+    assert decision.regime == 1  # default without model
+    assert "volatility_ratio" in decision.features
+    forced = clf.on_1h_close(bar, cfg, {"ai_enabled": False, "force_regime": 2})
+    assert forced.regime == 2 and forced.source == "manual"
+    assert cfg["grid_paused"] is True  # volatile profile
+    print("OK regime classifier fallback/manual")
 
 
 def test_signal_pipeline() -> None:
@@ -153,6 +205,7 @@ if __name__ == "__main__":
     write_sample_csv(sample)
     test_lee_ready_and_mf()
     test_incremental_engine()
+    test_regime_classifier_fallback()
     test_signal_pipeline()
     test_zmq_pubsub()
     print("\nAll tests passed.")

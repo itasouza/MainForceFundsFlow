@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections import deque
+from collections import defaultdict, deque
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import numpy as np
@@ -18,6 +19,94 @@ from python_engine.signal_engine import (
 
 TF_KEYS = ("10m", "30m", "1H")
 TF_FLOOR = {"10m": "10min", "30m": "30min", "1H": "1h"}
+
+
+@dataclass
+class TickResult:
+    """Outcome of processing one tick (hot path stays O(1))."""
+
+    signal_payload: dict[str, Any] | None = None
+    closed_1h: dict[str, Any] | None = None
+    closed_10m: dict[str, Any] | None = None
+
+
+def _round_price_level(price: float, tick_size: float = 0.10) -> float:
+    """
+    GC tick bin ($0.10). Equivalent to ``round(price, 1)`` when tick_size=0.10.
+
+    Kept O(1) — no DataFrame.
+    """
+    if tick_size <= 0:
+        return round(float(price), 1)
+    # One decimal for GC; avoids float drift (e.g. 2675.299999 → 2675.3)
+    return round(round(float(price) / tick_size) * tick_size, 1)
+
+
+def _empty_footprint() -> dict[str, Any]:
+    """Schema consumed by dashboard / future EA (MQL5 / NinjaScript)."""
+    return {
+        "price_levels": [],
+        "mf_buy_vol": [],
+        "mf_sell_vol": [],
+        "net_mf_vol": [],
+        "absorption_level": None,
+        "absorption_volume": 0.0,
+        "high": None,
+        "low": None,
+        "close": None,
+    }
+
+
+def _profiles_to_footprint(
+    buy_profile: dict[float, float],
+    sell_profile: dict[float, float],
+    *,
+    high: float | None = None,
+    low: float | None = None,
+    close: float | None = None,
+) -> dict[str, Any]:
+    """
+    Finalize buy/sell dicts into array payload (bar-close only — not hot path).
+
+    Absorption = price with largest |net MF volume| (buy − sell).
+    Grid tip: do not park limit orders exactly on absorption_level — shift 2–4 ticks;
+    net+ below price ≈ institutional floor; net− above ≈ institutional ceiling.
+    """
+    levels = sorted(set(buy_profile) | set(sell_profile))
+    if not levels:
+        out = _empty_footprint()
+        out["high"] = high
+        out["low"] = low
+        out["close"] = close
+        return out
+
+    buys: list[float] = []
+    sells: list[float] = []
+    nets: list[float] = []
+    abs_level: float | None = None
+    abs_vol = 0.0
+    for lv in levels:
+        b = float(buy_profile.get(lv, 0.0))
+        s = float(sell_profile.get(lv, 0.0))
+        n = b - s
+        buys.append(round(b, 4))
+        sells.append(round(s, 4))
+        nets.append(round(n, 4))
+        if abs_level is None or abs(n) > abs(abs_vol):
+            abs_level = float(lv)
+            abs_vol = n
+
+    return {
+        "price_levels": [float(lv) for lv in levels],
+        "mf_buy_vol": buys,
+        "mf_sell_vol": sells,
+        "net_mf_vol": nets,
+        "absorption_level": abs_level,
+        "absorption_volume": round(float(abs_vol), 4),
+        "high": high,
+        "low": low,
+        "close": close,
+    }
 
 
 def _empty_bar(bar_start: pd.Timestamp | None = None) -> dict[str, Any]:
@@ -37,11 +126,18 @@ def _empty_bar(bar_start: pd.Timestamp | None = None) -> dict[str, Any]:
         "mf_delta_norm": 0.0,
         "retail_delta": 0.0,
         "retail_delta_norm": 0.0,
+        # Institutional footprint hot path: O(1) defaultdict bumps (no pandas)
+        "mf_buy_profile": defaultdict(float),
+        "mf_sell_profile": defaultdict(float),
     }
 
 
 def _finalize_metrics(bar: dict[str, Any]) -> dict[str, Any]:
-    out = deepcopy(bar)
+    # Plain dicts before deepcopy (defaultdict → JSON-safe)
+    buy_prof = dict(bar.get("mf_buy_profile") or {})
+    sell_prof = dict(bar.get("mf_sell_profile") or {})
+    bar_plain = {**bar, "mf_buy_profile": buy_prof, "mf_sell_profile": sell_prof}
+    out = deepcopy(bar_plain)
     mf_buy = float(out["mf_buy_vol"])
     mf_sell = float(out["mf_sell_vol"])
     rt_buy = float(out["retail_buy_vol"])
@@ -52,6 +148,13 @@ def _finalize_metrics(bar: dict[str, Any]) -> dict[str, Any]:
     out["mf_delta_norm"] = mf_delta / (mf_buy + mf_sell + 1e-8)
     out["retail_delta"] = rt_delta
     out["retail_delta_norm"] = rt_delta / (rt_buy + rt_sell + 1e-8)
+    out["institutional_footprint"] = _profiles_to_footprint(
+        buy_prof,
+        sell_prof,
+        high=float(out["high"]),
+        low=float(out["low"]),
+        close=float(out["close"]),
+    )
     out["is_open"] = False
     return out
 
@@ -83,6 +186,7 @@ class IncrementalMTFEngine:
         self.config = config
         self.mf_fixed = float(config["mf_fixed_threshold_contracts"])
         self.mf_percentile = float(config["mf_dynamic_percentile"])
+        self.tick_size = float(config.get("tick_size", 0.10))
         self.rolling_window_hours = float(config.get("rolling_window_hours", 24))
         self.history_limit = int(config.get("chart_bars_display", 100))
         self.percentile_every = int(config.get("percentile_recompute_ticks", 1000))
@@ -98,6 +202,10 @@ class IncrementalMTFEngine:
             tf: _empty_bar() for tf in TF_KEYS
         }
         self.history_bars: dict[str, list[dict[str, Any]]] = {tf: [] for tf in TF_KEYS}
+        # Last CLOSED bar footprint per TF (dashboard + EA JSON — not rolling history)
+        self.last_closed_footprints: dict[str, dict[str, Any]] = {
+            tf: _empty_footprint() for tf in TF_KEYS
+        }
 
         self.last_known_direction = 0  # 1 buyer, -1 seller
         self.last_price: float | None = None
@@ -107,16 +215,31 @@ class IncrementalMTFEngine:
 
         self._closed_10m_this_tick = False
         self._last_payload: dict[str, Any] | None = None
+        self.regime_info: dict[str, Any] = {
+            "regime": int(config.get("active_regime", 1)),
+            "label": "Strong Trend / Standard",
+            "source": "default",
+            "features": {},
+        }
 
-    def process_tick(self, tick: dict[str, Any]) -> dict[str, Any] | None:
+    def apply_runtime_config(self) -> None:
+        """Refresh cached thresholds after PARAM_PROFILES / AI update."""
+        self.mf_fixed = float(self.config["mf_fixed_threshold_contracts"])
+        self.mf_percentile = float(self.config["mf_dynamic_percentile"])
+        self.tick_size = float(self.config.get("tick_size", 0.10))
+
+    def process_tick(self, tick: dict[str, Any]) -> TickResult:
         """
-        Ingest one tick. Returns signal payload if a 10m bar just closed, else None.
+        Ingest one tick in amortized O(1).
+
+        Returns TickResult with optional 10m signal payload and/or closed 1H bar
+        (regime AI should run only when ``closed_1h`` is set).
         """
         self._closed_10m_this_tick = False
         price = float(tick["price"])
         volume = float(tick["volume"])
         if volume <= 0:
-            return None
+            return TickResult()
 
         ts = pd.Timestamp(tick["timestamp"])
         if ts.tzinfo is None:
@@ -134,16 +257,29 @@ class IncrementalMTFEngine:
         is_mf = (volume >= self.mf_fixed) and (volume >= self.dynamic_percentile_value)
 
         closed_10m: dict[str, Any] | None = None
+        closed_1h: dict[str, Any] | None = None
         for tf in TF_KEYS:
             closed = self._update_bar(tf, ts, price, volume, is_buyer, is_mf)
             if tf == "10m" and closed is not None:
                 closed_10m = closed
                 self._closed_10m_this_tick = True
+            if tf == "1H" and closed is not None:
+                closed_1h = closed
 
         self.last_price = price
-        if closed_10m is None:
-            return None
-        return self._evaluate_and_build_payload(closed_10m, ts)
+        payload = None
+        if closed_10m is not None:
+            # Respect volatile/news profile kill-switch for new grid bias
+            if self.config.get("grid_paused"):
+                payload = self._evaluate_and_build_payload(closed_10m, ts)
+                if payload is not None:
+                    payload["composite_signal"] = 0
+                    payload["grid_paused"] = True
+                    payload["confidence_score"] = 0.0
+                    self._last_payload = payload
+            else:
+                payload = self._evaluate_and_build_payload(closed_10m, ts)
+        return TickResult(signal_payload=payload, closed_1h=closed_1h, closed_10m=closed_10m)
 
     def snapshot_state(self) -> dict[str, Any]:
         """Lightweight dashboard state (no disk write)."""
@@ -170,7 +306,21 @@ class IncrementalMTFEngine:
             ),
             "engine": "incremental",
             "mf_dynamic_threshold": round(float(self.dynamic_percentile_value), 4),
+            "regime": self.regime_info,
+            "thresholds": {
+                "threshold_1h": self.config.get("threshold_1h"),
+                "threshold_30m": self.config.get("threshold_30m"),
+                "threshold_10m": self.config.get("threshold_10m"),
+                "mf_fixed_threshold_contracts": self.config.get("mf_fixed_threshold_contracts"),
+                "grid_paused": self.config.get("grid_paused", False),
+            },
+            # Persisted for Streamlit / future execution Strategy
+            "institutional_footprint": self._institutional_footprint_bundle(),
         }
+
+    def _institutional_footprint_bundle(self) -> dict[str, dict[str, Any]]:
+        """Last-closed footprint for each TF (JSON-stable shallow copies)."""
+        return {tf: dict(self.last_closed_footprints[tf]) for tf in TF_KEYS}
 
     def _update_dynamic_threshold(self, ts: pd.Timestamp, volume: float) -> None:
         self.volume_events.append((ts, volume))
@@ -245,6 +395,7 @@ class IncrementalMTFEngine:
             self.current_bars[tf] = bar
         elif bar["bar_start_time"] != bar_time:
             closed = _finalize_metrics(bar)
+            self.last_closed_footprints[tf] = closed["institutional_footprint"]
             self.history_bars[tf].append(closed)
             if len(self.history_bars[tf]) > 500:
                 self.history_bars[tf] = self.history_bars[tf][-500:]
@@ -263,6 +414,12 @@ class IncrementalMTFEngine:
                 bar["mf_buy_vol"] += volume
             else:
                 bar["mf_sell_vol"] += volume
+            # O(1): where is MF printing + Lee-Ready aggression (buy vs sell profile)
+            level = _round_price_level(price, self.tick_size)
+            if is_buyer:
+                bar["mf_buy_profile"][level] += volume
+            else:
+                bar["mf_sell_profile"][level] += volume
         else:
             if is_buyer:
                 bar["retail_buy_vol"] += volume
@@ -332,6 +489,8 @@ class IncrementalMTFEngine:
             payload["divergence_detected"] = div
             payload["divergence_message"] = msg
         payload["session"] = active_session(ts_close, self.config["sessions"])
+        # institutional_footprint: last closed 10m/30m/1H — EA-ready schema
+        payload["institutional_footprint"] = self._institutional_footprint_bundle()
         self._last_payload = payload
         return payload
 
@@ -348,7 +507,7 @@ def run_incremental_on_ticks(
     else:
         records = ticks
     for row in records:
-        payload = engine.process_tick(row)
-        if payload is not None and on_signal is not None:
-            on_signal(payload)
+        result = engine.process_tick(row)
+        if result.signal_payload is not None and on_signal is not None:
+            on_signal(result.signal_payload)
     return engine

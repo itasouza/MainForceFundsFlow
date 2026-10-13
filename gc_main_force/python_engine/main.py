@@ -18,6 +18,7 @@ if str(_ROOT) not in sys.path:
 from python_engine.config import get_config
 from python_engine.incremental_engine import IncrementalMTFEngine
 from python_engine.mtf_aggregator import TIMEFRAMES, build_all_timeframes, get_context_at_time
+from python_engine.regime_classifier import MarketRegimeClassifier, load_ai_controls
 from python_engine.signal_engine import (
     active_session,
     build_payload,
@@ -139,7 +140,13 @@ def _engine_recompute(
 
 
 def run_live_incremental(cfg: dict, store: EngineStateStore) -> None:
-    """High-performance live path: O(1) per tick; disk write ONLY on 10m bar close."""
+    """
+    High-performance live path: O(1) per tick.
+
+    Disk policy:
+    - Lightweight heartbeat every ``heartbeat_persist_sec`` (dashboard LIVE/price/ticks)
+    - Full signal + ZMQ publish on 10m bar close
+    """
     transport = str(cfg.get("nt_tick_transport", "zmq"))
     sub = NtTickSubscriber(
         endpoint=str(cfg["nt_zmq_subscribe"]),
@@ -151,17 +158,25 @@ def run_live_incremental(cfg: dict, store: EngineStateStore) -> None:
         topic=str(cfg["signal_zmq_topic"]),
     )
     engine = IncrementalMTFEngine(cfg)
+    model_path = Path(str(cfg.get("regime_model_path", ""))) if cfg.get("regime_model_path") else None
+    classifier = MarketRegimeClassifier(model_path=model_path)
+    controls_path = Path(__file__).resolve().parents[1] / str(
+        cfg.get("ai_controls_file", "ai_controls.json")
+    )
     stop = threading.Event()
+    heartbeat_sec = float(cfg.get("heartbeat_persist_sec", 2.0))
+    if heartbeat_sec <= 0:
+        heartbeat_sec = 2.0
 
-    # One-time boot write so dashboard sees mode=live before first 10m close
     store.update(mode="live", live=False, tick_count=0, engine="incremental", persist=True)
     print(f"Listening ticks (incremental/{transport}): {cfg['nt_zmq_subscribe']} topic={cfg['nt_zmq_topic']}")
     print(f"Publishing signals: {cfg['signal_zmq_publish']} topic={cfg['signal_zmq_topic']}")
-    print("Disk write: signal_state.json ONLY on 10m bar close (avoids Windows file locks).")
+    print(f"Dashboard heartbeat every {heartbeat_sec:.1f}s; composite signal on 10m close.")
+    print(f"AI regime model: {model_path if model_path and model_path.exists() else 'default/fallback'}")
 
     t = threading.Thread(
         target=_incremental_recv_loop,
-        args=(sub, engine, store, publisher, stop),
+        args=(sub, engine, store, publisher, stop, heartbeat_sec, cfg, classifier, controls_path),
         daemon=True,
     )
     t.start()
@@ -182,37 +197,84 @@ def _incremental_recv_loop(
     store: EngineStateStore,
     publisher: SignalPublisher,
     stop: threading.Event,
+    heartbeat_sec: float,
+    cfg: dict,
+    classifier: MarketRegimeClassifier,
+    controls_path: Path,
 ) -> None:
     last_tick_mono = 0.0
+    last_persist = 0.0
     while not stop.is_set():
         tick = sub.recv_tick()
         if tick is None:
             if last_tick_mono and (time.monotonic() - last_tick_mono) > 5.0:
-                store.update(persist=False, live=False)
+                now = time.monotonic()
+                if now - last_persist >= heartbeat_sec:
+                    store.update(persist=True, live=False)
+                    last_persist = now
+                else:
+                    store.update(persist=False, live=False)
             continue
         if tick["volume"] <= 0:
             continue
 
         last_tick_mono = time.monotonic()
-        payload = engine.process_tick(tick)
-        snap = engine.snapshot_state()
+        result = engine.process_tick(tick)
 
+        # --- AI regime: ONLY on 1H bar close (no impact on 10m/30m hot path cost) ---
+        if result.closed_1h is not None and cfg.get("ai_regime_enabled", True):
+            controls = load_ai_controls(controls_path)
+            decision = classifier.on_1h_close(result.closed_1h, cfg, controls)
+            # Human kill-switch can force pause even outside volatile profile
+            if controls.get("pause_grid"):
+                cfg["grid_paused"] = True
+            engine.apply_runtime_config()
+            engine.regime_info = {
+                "regime": decision.regime,
+                "label": decision.label,
+                "source": decision.source,
+                "features": decision.features,
+            }
+            if decision.changed:
+                print(
+                    f"⚠️ Regime changed to {decision.regime} ({decision.label}) "
+                    f"via {decision.source}. Thresholds updated."
+                )
+
+        if result.signal_payload is not None and result.closed_10m is not None:
+            classifier.record_10m_close(
+                result.closed_10m,
+                int(result.signal_payload.get("composite_signal", 0)),
+            )
+
+        snap = engine.snapshot_state()
+        # Surface kill-switch for dashboard / future strategy
+        snap["ai_controls"] = load_ai_controls(controls_path)
+        now = time.monotonic()
+
+        payload = result.signal_payload
         if payload is not None:
-            # ONLY disk persistence point in the live loop
+            payload["regime"] = engine.regime_info.get("regime")
+            payload["regime_label"] = engine.regime_info.get("label")
             store.push_signal(payload, persist=False)
             store.merge(snap, persist=True)
+            last_persist = now
             try:
                 publisher.publish(payload)
             except Exception as exc:  # noqa: BLE001
                 print(f"ZMQ publish error: {exc}")
             print(
                 f"10m close signal={payload['composite_signal']} "
-                f"conf={payload['confidence_score']} ts={payload['timestamp']}"
+                f"conf={payload['confidence_score']} ts={payload['timestamp']} "
+                f"regime={engine.regime_info.get('regime')}"
             )
             continue
 
-        # In-memory only between bar closes (no JSON write → no PermissionError)
-        store.merge(snap, persist=False)
+        if now - last_persist >= heartbeat_sec:
+            store.merge(snap, persist=True)
+            last_persist = now
+        else:
+            store.merge(snap, persist=False)
 
 
 def run_live_batch(cfg: dict, store: EngineStateStore) -> None:
