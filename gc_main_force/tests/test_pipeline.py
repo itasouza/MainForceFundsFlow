@@ -55,6 +55,27 @@ def test_lee_ready_and_mf() -> None:
     print("OK classify/segment:", len(prepared), "ticks")
 
 
+def test_incremental_engine() -> None:
+    from python_engine.incremental_engine import IncrementalMTFEngine
+
+    cfg = get_config({"mode": "live", "percentile_recompute_ticks": 50})
+    engine = IncrementalMTFEngine(cfg)
+    ticks = generate_synthetic_ticks(hours=6)
+    signals = 0
+    for row in ticks.to_dict(orient="records"):
+        payload = engine.process_tick(row)
+        if payload is not None:
+            signals += 1
+            assert payload["composite_signal"] in (-1, 0, 1)
+            assert "timeframes" in payload
+    assert engine.tick_count == len(ticks)
+    assert len(engine.history_bars["10m"]) > 0
+    snap = engine.snapshot_state()
+    assert snap["engine"] == "incremental" or snap.get("tick_count", 0) > 0
+    assert snap["last_price"] is not None
+    print("OK incremental:", engine.tick_count, "ticks,", signals, "10m closes,", len(engine.history_bars["10m"]), "bars")
+
+
 def test_signal_pipeline() -> None:
     cfg = get_config({"mode": "backtest"})
     ticks = generate_synthetic_ticks(hours=36)
@@ -131,6 +152,7 @@ if __name__ == "__main__":
     sample = _ROOT / "backtest" / "sample_data" / "gc_ticks_sample.csv"
     write_sample_csv(sample)
     test_lee_ready_and_mf()
+    test_incremental_engine()
     test_signal_pipeline()
     test_zmq_pubsub()
     print("\nAll tests passed.")

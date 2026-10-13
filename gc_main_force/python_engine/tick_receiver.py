@@ -1,4 +1,4 @@
-"""Tick ingest from NinjaTrader (TCP JSON lines) or CSV backtest."""
+"""Tick ingest from NinjaTrader (ZeroMQ or TCP) + CSV backtest."""
 
 from __future__ import annotations
 
@@ -49,7 +49,6 @@ def load_ticks_csv(path: Path | str) -> pd.DataFrame:
 
 
 def _parse_tcp_endpoint(endpoint: str) -> tuple[str, int]:
-    """Parse ``tcp://host:port`` into host/port."""
     raw = endpoint.strip()
     if "://" not in raw:
         raw = "tcp://" + raw
@@ -59,21 +58,11 @@ def _parse_tcp_endpoint(endpoint: str) -> tuple[str, int]:
     return host, port
 
 
-class NtTickSubscriber:
-    """
-    Connect to NinjaTrader GC Tick Publisher (TCP JSON lines on port 5556).
+class NtTickSubscriberTcp:
+    """TCP JSON-lines client (legacy indicator publisher)."""
 
-    One JSON object per line, same schema as the former ZeroMQ payload.
-    """
-
-    def __init__(
-        self,
-        endpoint: str = "tcp://localhost:5556",
-        topic: str = "gc_ticks",  # kept for API compatibility; unused on TCP
-        recv_timeout_ms: int = 1000,
-    ) -> None:
+    def __init__(self, endpoint: str = "tcp://localhost:5556", recv_timeout_ms: int = 1000) -> None:
         self.endpoint = endpoint
-        self.topic = topic
         self._timeout = max(recv_timeout_ms, 100) / 1000.0
         self._host, self._port = _parse_tcp_endpoint(endpoint)
         self._sock: socket.socket | None = None
@@ -98,12 +87,9 @@ class NtTickSubscriber:
             self._sock = None
 
     def recv_tick(self) -> dict[str, Any] | None:
-        """Receive one tick; None on timeout / reconnect wait."""
         if self._sock is None:
             self._connect()
             return None
-
-        # Drain complete lines from buffer first
         while "\n" not in self._buf:
             try:
                 chunk = self._sock.recv(4096)
@@ -116,7 +102,6 @@ class NtTickSubscriber:
                 self._connect()
                 return None
             self._buf += chunk.decode("utf-8", errors="ignore")
-
         line, _, rest = self._buf.partition("\n")
         self._buf = rest
         line = line.strip()
@@ -136,8 +121,79 @@ class NtTickSubscriber:
             self._sock = None
 
 
+class NtTickSubscriberZmq:
+    """ZeroMQ SUB client for GcTickPublisher AddOn (topic + JSON multipart)."""
+
+    def __init__(
+        self,
+        endpoint: str = "tcp://localhost:5556",
+        topic: str = "gc_ticks",
+        recv_timeout_ms: int = 1000,
+    ) -> None:
+        import zmq
+
+        self.endpoint = endpoint
+        self.topic = topic
+        self._zmq = zmq
+        self._ctx = zmq.Context.instance()
+        self._sock = self._ctx.socket(zmq.SUB)
+        self._sock.setsockopt(zmq.RCVTIMEO, recv_timeout_ms)
+        self._sock.setsockopt(zmq.LINGER, 0)
+        self._sock.connect(endpoint)
+        self._sock.subscribe(topic.encode("utf-8"))
+
+    def recv_tick(self) -> dict[str, Any] | None:
+        try:
+            parts = self._sock.recv_multipart()
+        except self._zmq.Again:
+            return None
+        if not parts:
+            return None
+        body = parts[-1]
+        if isinstance(body, bytes):
+            body = body.decode("utf-8")
+        try:
+            return normalize_tick(json.loads(body))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return None
+
+    def close(self) -> None:
+        self._sock.close(linger=0)
+
+
+class NtTickSubscriber:
+    """
+    Facade used by main.py.
+
+    transport:
+      - \"zmq\" → NetMQ AddOn (recommended production)
+      - \"tcp\" → Indicator TCP JSON lines (fallback)
+    """
+
+    def __init__(
+        self,
+        endpoint: str = "tcp://localhost:5556",
+        topic: str = "gc_ticks",
+        recv_timeout_ms: int = 1000,
+        transport: str = "zmq",
+    ) -> None:
+        self.endpoint = endpoint
+        self.topic = topic
+        self.transport = (transport or "zmq").lower()
+        if self.transport == "tcp":
+            self._impl: Any = NtTickSubscriberTcp(endpoint, recv_timeout_ms)
+        else:
+            self._impl = NtTickSubscriberZmq(endpoint, topic, recv_timeout_ms)
+
+    def recv_tick(self) -> dict[str, Any] | None:
+        return self._impl.recv_tick()
+
+    def close(self) -> None:
+        self._impl.close()
+
+
 class TickBuffer:
-    """Thread-safe rolling tick buffer."""
+    """Thread-safe rolling tick buffer (legacy batch engine)."""
 
     def __init__(self, max_hours: float = 48.0) -> None:
         self.max_hours = max_hours
@@ -182,7 +238,6 @@ def run_live_loop(
     stop_event: threading.Event,
     on_tick: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
-    """Background loop: receive NT ticks into buffer."""
     while not stop_event.is_set():
         tick = subscriber.recv_tick()
         if tick is None:
@@ -198,7 +253,6 @@ def iter_csv_replay(
     df: pd.DataFrame,
     delay_sec: float = 0.0,
 ) -> Iterator[dict[str, Any]]:
-    """Yield ticks from a DataFrame (optional pacing)."""
     for row in df.to_dict(orient="records"):
         yield normalize_tick(row)
         if delay_sec > 0:

@@ -51,14 +51,17 @@ cd gc_main_force
 pip install -r requirements.txt
 ```
 
-## Passo 1 — Add-on NinjaTrader
+## Passo 1 — Add-on NinjaTrader (recomendado: ZMQ + fila)
 
 Siga `ninjatrader_addon/INSTALL_INSTRUCTIONS.md`:
 
-1. Instale **NetMQ** no projeto Custom.
+1. Instale **NetMQ** + **AsyncIO** no Custom (DLL + References).
 2. Copie `GcTickPublisher.cs` → `Documentos\NinjaTrader 8\bin\Custom\AddOns\`
-3. Compile no NinjaScript Editor.
-4. Confirme janela **CONNECTED** e ticks em `tcp://*:5556` (tópico `gc_ticks`).
+3. Compile (F5). Abra **New → GC Tick Publisher ZMQ**.
+4. Confirme **CONNECTED (PUB)**, `Published/sec` > 0, porta `5556`, tópico `gc_ticks`.
+5. Python: `"nt_tick_transport": "zmq"` em `config.py`.
+
+Fallback sem NetMQ: indicador `GcTickPublisherIndicator.cs` + `"nt_tick_transport": "tcp"`.
 
 ## Passo 2 — Engine Python (live)
 
@@ -66,6 +69,11 @@ Siga `ninjatrader_addon/INSTALL_INSTRUCTIONS.md`:
 cd gc_main_force
 python -m python_engine.main --mode live
 ```
+
+Por padrão usa o **engine incremental** (`live_engine: incremental` em `config.py`):
+- **O(1)** por tick (sem reprocessar o buffer inteiro)
+- Disco: heartbeat ~5s + gravação completa a cada **fechamento 10m**
+- Fallback legado: `"live_engine": "batch"`
 
 - SUB ticks: `tcp://localhost:5556`
 - PUB sinais: `tcp://*:5555` (tópico `gold_mtf_flow`)

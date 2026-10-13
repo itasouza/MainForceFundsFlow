@@ -183,12 +183,13 @@ else:
         mime="text/csv",
     )
 
+engine_mode = state.get("engine") or "—"
 st.caption(
-    "Arquitetura: NinjaTrader (ticks ZMQ :5556) → Python engine → sinais ZMQ :5555 + este dashboard. "
-    f"Estado: `{STATE_PATH.name}`"
+    "Arquitetura: NinjaTrader (TCP :5556) → Python engine incremental → sinais ZMQ :5555 + dashboard. "
+    f"Estado: `{STATE_PATH.name}` · engine={engine_mode}"
 )
 
-# Auto-refresh in live view
+# Auto-refresh in live view (3s — state disk writes are heartbeat/10m, not 0.5s)
 if ui_mode.startswith("Live") and not pause:
-    time.sleep(1.5)
+    time.sleep(3.0)
     st.rerun()

@@ -9,8 +9,10 @@ CONFIG: dict[str, Any] = {
     "mode": "live",  # "live" or "backtest"
     "symbol": "GC",
     "contract_size_oz": 100,
-    # NinjaTrader TCP tick feed (JSON lines; no NetMQ needed in NT)
-    "nt_tick_transport": "tcp",  # "tcp" (default) | reserved
+    # NinjaTrader tick feed
+    # "zmq" = AddOn GcTickPublisher (NetMQ PUB, production)
+    # "tcp" = Indicator GC Tick Publisher (JSON lines, fallback)
+    "nt_tick_transport": "tcp",  # Indicator TCP; use "zmq" with AddOn GcTickPublisher ZMQ
     "nt_zmq_subscribe": "tcp://localhost:5556",
     "nt_zmq_topic": "gc_ticks",
 
@@ -27,7 +29,11 @@ CONFIG: dict[str, Any] = {
     "threshold_10m": 0.30,
     # Engine
     "tick_buffer_hours": 48,
-    "recompute_every_ticks": 20,
+    "recompute_every_ticks": 20,  # legacy batch engine only
+    "live_engine": "incremental",  # "incremental" (default) | "batch"
+    "percentile_recompute_ticks": 1000,
+    "volume_buffer_maxlen": 20000,
+    "heartbeat_persist_sec": 5.0,  # disk write cadence for live price/status
     "state_file": "signal_state.json",
     # Dashboard
     "dashboard_port": 8501,

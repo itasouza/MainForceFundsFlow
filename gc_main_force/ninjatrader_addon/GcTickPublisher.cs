@@ -1,15 +1,13 @@
 // ------------------------------------------------------------
-// GcTickPublisher.cs — NinjaTrader 8 Add-On
-// Menu: Control Center → New → Add-Ons → GC Tick Publisher
-// Publishes GC ticks as JSON lines over TCP port 5556 (no NetMQ).
+// GcTickPublisher.cs — NinjaTrader 8 Add-On (production)
+// Non-blocking tick export: ConcurrentQueue + background NetMQ PUB
+// Endpoint: tcp://*:5556  Topic: gc_ticks
+// JSON schema matches IncrementalMTFEngine / NtTickSubscriber
 // ------------------------------------------------------------
 #region Using declarations
 using System;
 using System.Collections.Concurrent;
 using System.Globalization;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -21,51 +19,74 @@ using NinjaTrader.Data;
 using NinjaTrader.Gui;
 using NinjaTrader.Gui.Tools;
 using NinjaTrader.NinjaScript;
+using NetMQ;
+using NetMQ.Sockets;
 #endregion
 
 namespace NinjaTrader.NinjaScript.AddOns
 {
+	/// <summary>Immutable tick snapshot queued from the market-data thread.</summary>
+	internal sealed class TickData
+	{
+		public DateTime TimestampUtc;
+		public string Symbol;
+		public double Price;
+		public long Volume;
+		public double Bid;
+		public double Ask;
+	}
+
 	public class GcTickPublisher : AddOnBase
 	{
-		private NTMenuItem _menuItem;
-		private NTMenuItem _newMenu;
+		// ---- config ----
+		private string _instrumentName = "GC";
+		private string _bindAddress = "tcp://*:5556";
+		private string _topic = "gc_ticks";
+		private const int MaxQueueSize = 50000;
 
-		private TcpListener _listener;
-		private readonly ConcurrentDictionary<int, TcpClient> _clients = new ConcurrentDictionary<int, TcpClient>();
-		private int _clientSeq;
-		private CancellationTokenSource _cts;
+		// ---- market ----
 		private Instrument _instrument;
+		private double _lastBid;
+		private double _lastAsk;
+		private bool _marketHooked;
+
+		// ---- queue / worker ----
+		private readonly ConcurrentQueue<TickData> _queue = new ConcurrentQueue<TickData>();
+		private CancellationTokenSource _cts;
+		private Task _workerTask;
+		private PublisherSocket _pub;
+		private readonly object _socketLock = new object();
+
+		// ---- stats / UI ----
+		private long _enqueued;
+		private long _published;
+		private long _dropped;
+		private long _publishedLastSecond;
+		private double _lastPrice;
+		private long _lastVolume;
+		private bool _connected;
 		private NTWindow _window;
 		private TextBlock _statusText;
 		private TextBlock _tpsText;
+		private TextBlock _queueText;
 		private TextBlock _lastTickText;
-		private TextBlock _clientsText;
 		private DispatcherTimer _uiTimer;
-
-		private long _ticksPublished;
-		private long _ticksLastSecond;
-		private double _lastPrice;
-		private long _lastVolume;
-		private bool _listening;
-		private bool _marketHooked;
-		private readonly int _port = 5556;
-		private readonly string _instrumentName = "GC";
-		private readonly object _startLock = new object();
+		private NTMenuItem _menuItem;
+		private NTMenuItem _newMenu;
 
 		protected override void OnStateChange()
 		{
 			if (State == State.SetDefaults)
 			{
-				Description = "Publishes GC ticks over TCP for Main Force Flow (Python). Open via New → Add-Ons → GC Tick Publisher.";
-				Name = "GC Tick Publisher";
+				Description = "High-performance GC tick publisher (ConcurrentQueue + NetMQ PUB) for Main Force Flow Python engine.";
+				Name = "GC Tick Publisher ZMQ";
 			}
 			else if (State == State.Terminated)
 			{
-				StopPublisher();
+				StopEverything();
 			}
 		}
 
-		// Inject menu into Control Center: New → Add-Ons → GC Tick Publisher
 		protected override void OnWindowCreated(Window window)
 		{
 			ControlCenter cc = window as ControlCenter;
@@ -76,17 +97,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 			if (_newMenu == null)
 				return;
 
-			// Avoid duplicate menu entries if Control Center recreates
 			foreach (object item in _newMenu.Items)
 			{
 				NTMenuItem mi = item as NTMenuItem;
-				if (mi != null && mi.Header != null && mi.Header.ToString() == "GC Tick Publisher")
+				if (mi != null && mi.Header != null && mi.Header.ToString() == "GC Tick Publisher ZMQ")
 					return;
 			}
 
 			_menuItem = new NTMenuItem
 			{
-				Header = "GC Tick Publisher",
+				Header = "GC Tick Publisher ZMQ",
 				Style = Application.Current.TryFindResource("MainMenuItem") as Style
 			};
 			_menuItem.Click += OnMenuItemClick;
@@ -101,42 +121,48 @@ namespace NinjaTrader.NinjaScript.AddOns
 				_newMenu.Items.Remove(_menuItem);
 				_menuItem = null;
 			}
-
 			if (_window != null && ReferenceEquals(window, _window))
 				_window = null;
 		}
 
 		private void OnMenuItemClick(object sender, RoutedEventArgs e)
 		{
-			EnsurePublisherStarted();
+			StartPublisher();
 			ShowOrFocusWindow();
 		}
 
-		private void EnsurePublisherStarted()
+		private void StartPublisher()
 		{
-			lock (_startLock)
+			if (_cts != null && !_cts.IsCancellationRequested)
 			{
-				if (_listening)
+				EnsureMarketData();
+				return;
+			}
+
+			try
+			{
+				_cts = new CancellationTokenSource();
+				lock (_socketLock)
 				{
-					EnsureMarketData();
-					return;
+					_pub = new PublisherSocket();
+					_pub.Options.SendHighWatermark = 10000;
+					_pub.Bind(_bindAddress);
+					_connected = true;
 				}
 
-				try
-				{
-					_cts = new CancellationTokenSource();
-					_listener = new TcpListener(IPAddress.Any, _port);
-					_listener.Start();
-					_listening = true;
-					Task.Run(() => AcceptLoop(_cts.Token));
-					EnsureMarketData();
-					Log(string.Format("GC Tick Publisher listening on TCP:{0}", _port), LogLevel.Information);
-				}
-				catch (Exception ex)
-				{
-					_listening = false;
-					Log("GC Tick Publisher failed to start: " + ex.Message, LogLevel.Error);
-				}
+				_workerTask = Task.Factory.StartNew(
+					() => PublishLoop(_cts.Token),
+					_cts.Token,
+					TaskCreationOptions.LongRunning,
+					TaskScheduler.Default);
+
+				EnsureMarketData();
+				Log(string.Format("GC Tick Publisher ZMQ bound {0} topic={1}", _bindAddress, _topic), LogLevel.Information);
+			}
+			catch (Exception ex)
+			{
+				_connected = false;
+				Log("GC Tick Publisher ZMQ start failed: " + ex.Message, LogLevel.Error);
 			}
 		}
 
@@ -148,16 +174,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 			_instrument = Instrument.GetInstrument(_instrumentName);
 			if (_instrument == null)
 			{
-				Log(string.Format("Instrument '{0}' not found. Open a GC chart / check symbol.", _instrumentName), LogLevel.Error);
+				Log(string.Format("Instrument '{0}' not found.", _instrumentName), LogLevel.Error);
 				return;
 			}
 
 			_instrument.MarketData.Update += OnMarketDataUpdate;
 			_marketHooked = true;
-			Log("Subscribed to market data: " + _instrument.FullName, LogLevel.Information);
+			Log("MarketData hooked: " + _instrument.FullName, LogLevel.Information);
 		}
 
-		private void StopPublisher()
+		private void StopEverything()
 		{
 			try
 			{
@@ -176,109 +202,133 @@ namespace NinjaTrader.NinjaScript.AddOns
 				if (_cts != null)
 				{
 					_cts.Cancel();
+					try
+					{
+						if (_workerTask != null)
+							_workerTask.Wait(2000);
+					}
+					catch { }
 					_cts.Dispose();
 					_cts = null;
+					_workerTask = null;
 				}
 
-				if (_listener != null)
+				lock (_socketLock)
 				{
-					try { _listener.Stop(); } catch { }
-					_listener = null;
+					if (_pub != null)
+					{
+						try { _pub.Dispose(); } catch { }
+						_pub = null;
+					}
 				}
 
-				foreach (var kv in _clients)
-				{
-					try { kv.Value.Close(); } catch { }
-				}
-				_clients.Clear();
-				_listening = false;
+				// Drain leftover queue
+				TickData unused;
+				while (_queue.TryDequeue(out unused)) { }
+
+				_connected = false;
 			}
 			catch (Exception ex)
 			{
-				Log("GC Tick Publisher stop error: " + ex.Message, LogLevel.Warning);
+				Log("GC Tick Publisher ZMQ stop: " + ex.Message, LogLevel.Warning);
 			}
 		}
 
-		private async Task AcceptLoop(CancellationToken token)
+		/// <summary>
+		/// CRITICAL: only enqueue here — never do network I/O on the MD thread.
+		/// </summary>
+		private void OnMarketDataUpdate(object sender, MarketDataEventArgs e)
+		{
+			if (e == null)
+				return;
+
+			if (e.MarketDataType == MarketDataType.Bid)
+			{
+				_lastBid = e.Price;
+				return;
+			}
+			if (e.MarketDataType == MarketDataType.Ask)
+			{
+				_lastAsk = e.Price;
+				return;
+			}
+			if (e.MarketDataType != MarketDataType.Last)
+				return;
+			if (e.Volume <= 0)
+				return;
+
+			// Bound memory if Python is down / worker slow
+			if (_queue.Count >= MaxQueueSize)
+			{
+				TickData dropped;
+				if (_queue.TryDequeue(out dropped))
+					Interlocked.Increment(ref _dropped);
+			}
+
+			TickData tick = new TickData
+			{
+				TimestampUtc = e.Time.ToUniversalTime(),
+				Symbol = _instrumentName,
+				Price = e.Price,
+				Volume = e.Volume,
+				Bid = _lastBid,
+				Ask = _lastAsk
+			};
+
+			_queue.Enqueue(tick);
+			Interlocked.Increment(ref _enqueued);
+			_lastPrice = e.Price;
+			_lastVolume = e.Volume;
+		}
+
+		private void PublishLoop(CancellationToken token)
 		{
 			while (!token.IsCancellationRequested)
 			{
+				TickData tick;
+				if (!_queue.TryDequeue(out tick))
+				{
+					Thread.Sleep(1);
+					continue;
+				}
+
 				try
 				{
-					TcpClient client = await _listener.AcceptTcpClientAsync().ConfigureAwait(false);
-					client.NoDelay = true;
-					int id = Interlocked.Increment(ref _clientSeq);
-					_clients[id] = client;
-					Log("Python client connected #" + id, LogLevel.Information);
-				}
-				catch (ObjectDisposedException)
-				{
-					break;
+					string json = BuildJson(tick);
+					lock (_socketLock)
+					{
+						if (_pub == null)
+							continue;
+						// multipart: topic + body (Python SUB filters on topic)
+						_pub.SendMoreFrame(_topic).SendFrame(json);
+					}
+					Interlocked.Increment(ref _published);
+					Interlocked.Increment(ref _publishedLastSecond);
+					_connected = true;
 				}
 				catch (Exception)
 				{
-					if (token.IsCancellationRequested)
-						break;
-					try { await Task.Delay(250, token).ConfigureAwait(false); } catch { break; }
+					// Fire-and-forget: never crash NT if subscriber is gone
+					_connected = false;
+					try { Thread.Sleep(5); } catch { }
 				}
 			}
 		}
 
-		private void OnMarketDataUpdate(object sender, MarketDataEventArgs e)
+		private static string BuildJson(TickData t)
 		{
-			if (e.MarketDataType != MarketDataType.Last)
-				return;
-
-			double price = e.Price;
-			long volume = e.Volume;
-			if (volume <= 0)
-				return;
-
-			double bid = 0;
-			double ask = 0;
-			try
-			{
-				if (_instrument != null && _instrument.MarketData != null)
-				{
-					if (_instrument.MarketData.Bid != null)
-						bid = _instrument.MarketData.Bid.Price;
-					if (_instrument.MarketData.Ask != null)
-						ask = _instrument.MarketData.Ask.Price;
-				}
-			}
-			catch { }
-
-			DateTime utc = e.Time.ToUniversalTime();
-			string json = string.Format(CultureInfo.InvariantCulture,
-				"{{\"timestamp\":\"{0:yyyy-MM-ddTHH:mm:ss.fff}Z\",\"symbol\":\"GC\",\"price\":{1:F2},\"volume\":{2},\"bid\":{3:F2},\"ask\":{4:F2}}}\n",
-				utc, price, volume, bid, ask);
-
-			Broadcast(Encoding.UTF8.GetBytes(json));
-			Interlocked.Increment(ref _ticksPublished);
-			Interlocked.Increment(ref _ticksLastSecond);
-			_lastPrice = price;
-			_lastVolume = volume;
+			// Manual format (InvariantCulture) — avoids ambiguity / allocation of anonymous types
+			return string.Format(CultureInfo.InvariantCulture,
+				"{{\"timestamp\":\"{0:yyyy-MM-ddTHH:mm:ss.fff}Z\",\"symbol\":\"{1}\",\"price\":{2},\"volume\":{3},\"bid\":{4},\"ask\":{5}}}",
+				t.TimestampUtc,
+				t.Symbol,
+				t.Price.ToString("F2", CultureInfo.InvariantCulture),
+				t.Volume.ToString(CultureInfo.InvariantCulture),
+				t.Bid.ToString("F2", CultureInfo.InvariantCulture),
+				t.Ask.ToString("F2", CultureInfo.InvariantCulture));
 		}
 
-		private void Broadcast(byte[] payload)
-		{
-			foreach (var kv in _clients)
-			{
-				try
-				{
-					NetworkStream stream = kv.Value.GetStream();
-					if (stream.CanWrite)
-						stream.Write(payload, 0, payload.Length);
-				}
-				catch
-				{
-					TcpClient removed;
-					_clients.TryRemove(kv.Key, out removed);
-					try { if (removed != null) removed.Close(); } catch { }
-				}
-			}
-		}
-
+		// ---- UI ----
 		private void ShowOrFocusWindow()
 		{
 			if (Application.Current == null)
@@ -295,9 +345,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 				_window = new NTWindow
 				{
-					Title = "GC Tick Publisher (TCP)",
-					Width = 400,
-					Height = 230,
+					Title = "GC Tick Publisher (ZeroMQ)",
+					Width = 420,
+					Height = 240,
 					Content = BuildPanel()
 				};
 				_window.Closed += (s, e) => { _window = null; };
@@ -314,36 +364,53 @@ namespace NinjaTrader.NinjaScript.AddOns
 			var stack = new StackPanel { Margin = new Thickness(12) };
 			_statusText = new TextBlock { FontSize = 16, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) };
 			_tpsText = new TextBlock { FontSize = 13, Margin = new Thickness(0, 0, 0, 4) };
-			_clientsText = new TextBlock { FontSize = 13, Margin = new Thickness(0, 0, 0, 4) };
+			_queueText = new TextBlock { FontSize = 13, Margin = new Thickness(0, 0, 0, 4) };
 			_lastTickText = new TextBlock { FontSize = 13 };
 
 			stack.Children.Add(new TextBlock
 			{
-				Text = "Abra pelo menu: New → Add-Ons → GC Tick Publisher",
+				Text = "Menu: New → GC Tick Publisher ZMQ",
 				FontSize = 11,
 				Foreground = Brushes.Gray,
 				Margin = new Thickness(0, 0, 0, 8)
 			});
 			stack.Children.Add(_statusText);
-			stack.Children.Add(new TextBlock { Text = "TCP port: " + _port + "  (JSON lines)", FontSize = 12, Foreground = Brushes.Gray });
-			stack.Children.Add(new TextBlock { Text = "Instrument: " + _instrumentName + " (100 oz)", FontSize = 12, Foreground = Brushes.Gray, Margin = new Thickness(0, 0, 0, 8) });
+			stack.Children.Add(new TextBlock
+			{
+				Text = "PUB " + _bindAddress + "  topic=" + _topic,
+				FontSize = 12,
+				Foreground = Brushes.Gray
+			});
+			stack.Children.Add(new TextBlock
+			{
+				Text = "Instrument: " + _instrumentName + " (queue+worker, non-blocking)",
+				FontSize = 12,
+				Foreground = Brushes.Gray,
+				Margin = new Thickness(0, 0, 0, 8)
+			});
 			stack.Children.Add(_tpsText);
-			stack.Children.Add(_clientsText);
+			stack.Children.Add(_queueText);
 			stack.Children.Add(_lastTickText);
 			return stack;
 		}
 
 		private void RefreshUi()
 		{
-			long tps = Interlocked.Exchange(ref _ticksLastSecond, 0);
+			long tps = Interlocked.Exchange(ref _publishedLastSecond, 0);
 			if (_statusText == null)
 				return;
 
-			_statusText.Text = _listening ? "● LISTENING" : "● STOPPED";
-			_statusText.Foreground = _listening ? Brushes.LimeGreen : Brushes.OrangeRed;
-			_tpsText.Text = string.Format("Ticks/sec: {0}  |  Total: {1}", tps, Interlocked.Read(ref _ticksPublished));
-			_clientsText.Text = string.Format("Python clients: {0}", _clients.Count);
-			_lastTickText.Text = string.Format(CultureInfo.InvariantCulture, "Last: {0:F2}  x {1}", _lastPrice, _lastVolume);
+			_statusText.Text = _connected ? "● CONNECTED (PUB)" : "● DISCONNECTED / waiting";
+			_statusText.Foreground = _connected ? Brushes.LimeGreen : Brushes.OrangeRed;
+			_tpsText.Text = string.Format(
+				"Published/sec: {0}  |  Total pub: {1}  |  Enqueued: {2}",
+				tps, Interlocked.Read(ref _published), Interlocked.Read(ref _enqueued));
+			_queueText.Text = string.Format(
+				"Queue: {0}  |  Dropped (backpressure): {1}",
+				_queue.Count, Interlocked.Read(ref _dropped));
+			_lastTickText.Text = string.Format(CultureInfo.InvariantCulture,
+				"Last: {0:F2} x {1}  bid={2:F2} ask={3:F2}",
+				_lastPrice, _lastVolume, _lastBid, _lastAsk);
 		}
 	}
 }

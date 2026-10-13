@@ -16,6 +16,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from python_engine.config import get_config
+from python_engine.incremental_engine import IncrementalMTFEngine
 from python_engine.mtf_aggregator import TIMEFRAMES, build_all_timeframes, get_context_at_time
 from python_engine.signal_engine import (
     active_session,
@@ -137,11 +138,95 @@ def _engine_recompute(
     store.update(last_price=price, latest_signal=last)
 
 
-def run_live(cfg: dict, store: EngineStateStore) -> None:
-    buffer = TickBuffer(max_hours=float(cfg["tick_buffer_hours"]))
+def run_live_incremental(cfg: dict, store: EngineStateStore) -> None:
+    """High-performance live path: O(1) per tick, disk write on heartbeat / 10m close."""
+    transport = str(cfg.get("nt_tick_transport", "zmq"))
     sub = NtTickSubscriber(
         endpoint=str(cfg["nt_zmq_subscribe"]),
         topic=str(cfg["nt_zmq_topic"]),
+        transport=transport,
+    )
+    publisher = SignalPublisher(
+        bind=str(cfg["signal_zmq_publish"]),
+        topic=str(cfg["signal_zmq_topic"]),
+    )
+    engine = IncrementalMTFEngine(cfg)
+    stop = threading.Event()
+    heartbeat_sec = float(cfg.get("heartbeat_persist_sec", 5.0))
+
+    store.update(mode="live", live=False, tick_count=0, engine="incremental")
+    print(f"Listening ticks (incremental/{transport}): {cfg['nt_zmq_subscribe']} topic={cfg['nt_zmq_topic']}")
+    print(f"Publishing signals: {cfg['signal_zmq_publish']} topic={cfg['signal_zmq_topic']}")
+    print(f"Heartbeat disk write every {heartbeat_sec:.1f}s; full signal on 10m bar close.")
+
+    t = threading.Thread(
+        target=_incremental_recv_loop,
+        args=(sub, engine, store, publisher, stop, heartbeat_sec),
+        daemon=True,
+    )
+    t.start()
+    try:
+        while not stop.is_set():
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        print("\nStopping live engine…")
+    finally:
+        stop.set()
+        sub.close()
+        publisher.close()
+
+
+def _incremental_recv_loop(
+    sub: NtTickSubscriber,
+    engine: IncrementalMTFEngine,
+    store: EngineStateStore,
+    publisher: SignalPublisher,
+    stop: threading.Event,
+    heartbeat_sec: float,
+) -> None:
+    last_persist = 0.0
+    while not stop.is_set():
+        tick = sub.recv_tick()
+        if tick is None:
+            # Mark stale if no ticks recently
+            if engine.last_tick_ts is not None:
+                age = time.monotonic() - last_persist
+                if age > 5:
+                    store.update(persist=False, live=False)
+            continue
+        if tick["volume"] <= 0:
+            continue
+        payload = engine.process_tick(tick)
+        snap = engine.snapshot_state()
+        now = time.monotonic()
+        if payload is not None:
+            store.push_signal(payload, persist=False)
+            store.merge(snap, persist=True)
+            try:
+                publisher.publish(payload)
+            except Exception as exc:  # noqa: BLE001
+                print(f"ZMQ publish error: {exc}")
+            print(
+                f"10m close signal={payload['composite_signal']} "
+                f"conf={payload['confidence_score']} ts={payload['timestamp']}"
+            )
+            last_persist = now
+            continue
+        if now - last_persist >= heartbeat_sec:
+            store.merge(snap, persist=True)
+            last_persist = now
+        else:
+            store.merge(snap, persist=False)
+
+
+def run_live_batch(cfg: dict, store: EngineStateStore) -> None:
+    """Legacy full-recompute live path (kept for comparison / debugging)."""
+    buffer = TickBuffer(max_hours=float(cfg["tick_buffer_hours"]))
+    transport = str(cfg.get("nt_tick_transport", "zmq"))
+    sub = NtTickSubscriber(
+        endpoint=str(cfg["nt_zmq_subscribe"]),
+        topic=str(cfg["nt_zmq_topic"]),
+        transport=transport,
     )
     publisher = SignalPublisher(
         bind=str(cfg["signal_zmq_publish"]),
@@ -150,8 +235,8 @@ def run_live(cfg: dict, store: EngineStateStore) -> None:
     stop = threading.Event()
     published: set[str] = set()
 
-    store.update(mode="live", live=False, tick_count=0)
-    print(f"Listening ticks: {cfg['nt_zmq_subscribe']} topic={cfg['nt_zmq_topic']}")
+    store.update(mode="live", live=False, tick_count=0, engine="batch")
+    print(f"Listening ticks (batch/{transport}): {cfg['nt_zmq_subscribe']} topic={cfg['nt_zmq_topic']}")
     print(f"Publishing signals: {cfg['signal_zmq_publish']} topic={cfg['signal_zmq_topic']}")
 
     t = threading.Thread(
@@ -172,7 +257,6 @@ def run_live(cfg: dict, store: EngineStateStore) -> None:
             if buffer.count == last_count:
                 continue
             if buffer.count - last_count < every and last_count > 0:
-                # still recompute periodically on wall clock if ticks slow
                 if age is not None and age < 2.0 and (buffer.count % every != 0):
                     continue
             last_count = buffer.count
@@ -184,6 +268,13 @@ def run_live(cfg: dict, store: EngineStateStore) -> None:
         stop.set()
         sub.close()
         publisher.close()
+
+
+def run_live(cfg: dict, store: EngineStateStore) -> None:
+    if str(cfg.get("live_engine", "incremental")).lower() == "batch":
+        run_live_batch(cfg, store)
+    else:
+        run_live_incremental(cfg, store)
 
 
 def run_backtest(cfg: dict, store: EngineStateStore, csv_path: Path, publish: bool) -> None:

@@ -31,17 +31,33 @@ class EngineStateStore:
             "active_session": None,
         }
 
-    def update(self, **kwargs: Any) -> None:
+    def update(self, persist: bool = True, **kwargs: Any) -> None:
         with self._lock:
             self.state.update(kwargs)
-            self._write_unlocked()
+            if persist:
+                self._write_unlocked()
 
-    def push_signal(self, payload: dict[str, Any], max_log: int = 50) -> None:
+    def merge(self, data: dict[str, Any], persist: bool = True) -> None:
+        """Merge a full snapshot dict into state."""
+        with self._lock:
+            # Preserve signal_log unless provided
+            if "signal_log" not in data and "signal_log" in self.state:
+                data = {**data, "signal_log": self.state["signal_log"]}
+            self.state.update(data)
+            if persist:
+                self._write_unlocked()
+
+    def push_signal(self, payload: dict[str, Any], max_log: int = 50, persist: bool = True) -> None:
         with self._lock:
             self.state["latest_signal"] = payload
             log = list(self.state.get("signal_log") or [])
             log.append(payload)
             self.state["signal_log"] = log[-max_log:]
+            if persist:
+                self._write_unlocked()
+
+    def flush(self) -> None:
+        with self._lock:
             self._write_unlocked()
 
     def set_bars_10m(self, bars: pd.DataFrame, limit: int = 100) -> None:
