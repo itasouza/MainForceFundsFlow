@@ -293,6 +293,7 @@ def render_mf_footprint_section(
     footprint_bundle: dict[str, Any] | None,
     *,
     selected_tf: str = "10m",
+    footprint_meta: dict[str, Any] | None = None,
 ) -> None:
     """
     Dashboard block: institutional footprint + grid decision table.
@@ -301,30 +302,68 @@ def render_mf_footprint_section(
     """
     st.subheader("🐉 Rastro Institucional (Footprint de Grandes Lotes)")
     st.caption(
-        "Onde e com que agressão o dinheiro grande está entrando? "
-        "(proxy de preço/volume MF no CME — sem seats de corretora.)"
+        "Onde e com que agressão o fluxo está entrando por preço? "
+        "(Lee-Ready no CME — sem seats de corretora. Sinal MF continua com threshold fixo.)"
     )
     bundle = footprint_bundle or {}
     primary = bundle.get(selected_tf) or {}
     ctx30 = bundle.get("30m") or {}
+    meta = footprint_meta or {}
+
+    live = bool(primary.get("live"))
+    source = str(primary.get("source") or "—")
+    n_levels = len(primary.get("price_levels") or [])
+    max_lot = float(primary.get("max_lot") or 0.0)
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Barra", "AO VIVO" if live else "fechada")
+    with m2:
+        st.metric("Níveis", n_levels)
+    with m3:
+        st.metric("Maior lote na barra", f"{max_lot:.0f}")
+    with m4:
+        st.metric(
+            "Filtro footprint",
+            f"≥{meta.get('fp_min', '—')} cts"
+            if not meta.get("mf_only")
+            else f"MF≥{meta.get('mf_fixed', '—')}",
+        )
+    if meta:
+        st.caption(
+            f"Sinal MF (AND): fixo≥{meta.get('mf_fixed', '—')} e p{meta.get('mf_dynamic', '—')} "
+            f"· source=`{source}`"
+        )
 
     abs_level = primary.get("absorption_level")
     abs_vol = float(primary.get("absorption_volume") or 0.0)
-    if abs_level is not None and abs_vol != 0:
+    if abs_level is not None and abs_vol != 0 and n_levels > 0:
         side = "compra (suporte)" if abs_vol > 0 else "venda (resistência)"
         st.markdown(
             f"**Nível de Absorção: `${float(abs_level):.2f}` "
             f"({abs_vol:+.0f} contratos net — {side})** · TF `{selected_tf}`"
         )
+        close = primary.get("close")
+        if close is not None:
+            if abs_vol > 0 and float(close) >= float(abs_level):
+                st.success("Grid: absorção de compra abaixo/no preço → chão institucional (compra confiante).")
+            elif abs_vol < 0 and float(close) <= float(abs_level):
+                st.success("Grid: absorção de venda acima/no preço → teto institucional (venda confiante).")
+            else:
+                st.warning("Grid: absorção do lado oposto ao preço — cautela / lotes menores.")
+    elif n_levels == 0:
+        st.warning(
+            "Footprint sem nós ainda. Se **Maior lote** ficar em 1 e o filtro MF≥10, "
+            "o gráfico fica vazio: use filtro por fluxo (padrão) ou confira o volume no Ninja."
+        )
     else:
-        st.info("Sem absorção MF na última barra fechada deste TF — fluxo ainda sem nó claro.")
+        st.info("Sem nó de absorção claro neste TF.")
 
     fig = build_institutional_footprint_chart(
         primary, context_30m=ctx30, tf_label=selected_tf
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    with st.expander("Como interpretar o Footprint para o Grid", expanded=False):
+    with st.expander("Como interpretar o Footprint para o Grid", expanded=True):
         st.markdown(
             """
 | Cenário | Ação no Grid |
@@ -335,8 +374,7 @@ def render_mf_footprint_section(
 | Sem nó claro / volume espalhado | ❌ Pausar grid — falta convicção institucional |
 
 **Pontos de atenção:** não coloque limites **exatamente** no `absorption_level`
-(desloque 2–4 ticks de $0.10). O campo JSON `institutional_footprint` é o contrato
-para a Strategy / EA futura.
+(desloque 2–4 ticks de $0.10). O JSON `institutional_footprint` alimenta a Strategy/EA.
             """
         )
 

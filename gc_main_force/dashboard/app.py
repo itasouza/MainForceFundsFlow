@@ -77,6 +77,7 @@ def run_local_backtest(csv_bytes: bytes, overrides: dict) -> dict:
         "bars_10m": snap.get("bars_10m") or [],
         "institutional_footprint": snap.get("institutional_footprint")
         or ((payloads[-1].get("institutional_footprint") if payloads else None) or {}),
+        "footprint_meta": snap.get("footprint_meta"),
         "active_session": payloads[-1].get("session") if payloads else None,
         "engine": "incremental",
         "regime": snap.get("regime"),
@@ -97,15 +98,15 @@ thr_30 = st.sidebar.slider("Threshold 30m", 0.05, 0.50, float(cfg["threshold_30m
 thr_10 = st.sidebar.slider("Threshold 10m", 0.05, 0.60, float(cfg["threshold_10m"]), 0.01)
 roll_h = st.sidebar.slider("Janela percentil (horas)", 1, 48, int(cfg["rolling_window_hours"]))
 pause = st.sidebar.checkbox("Pausar atualizações ao vivo", value=False)
-show_footprint = st.sidebar.toggle(
-    "Mostrar Rastro Institucional",
+show_footprint = st.sidebar.checkbox(
+    "Mostrar Rastro Institucional (LHB)",
     value=True,
-    help="Footprint MF por preço (última barra fechada) — onde o dinheiro grande agride.",
+    help="Mapa por preço: onde o fluxo agride (Lee-Ready). Sinal MF continua com threshold fixo.",
 )
-footprint_tf = st.sidebar.selectbox(
-    "Timeframe do Footprint",
-    options=["10m", "30m", "1H"],
-    index=0,
+footprint_tf = (
+    st.sidebar.selectbox("Timeframe do Footprint", ["10m", "30m", "1H"], index=0)
+    if show_footprint
+    else "10m"
 )
 
 st.sidebar.markdown("---")
@@ -225,10 +226,18 @@ st.subheader("Análise Multi-Timeframe")
 render_tf_columns(latest)
 
 if show_footprint:
+    # Live heartbeat prefers open-bar map; fall back to latest signal payload
     fp_bundle = state.get("institutional_footprint")
-    if not fp_bundle and latest:
-        fp_bundle = latest.get("institutional_footprint")
-    render_mf_footprint_section(fp_bundle, selected_tf=footprint_tf)
+    if not fp_bundle or not any(
+        (fp_bundle.get(tf) or {}).get("price_levels") for tf in ("10m", "30m", "1H")
+    ):
+        if latest and latest.get("institutional_footprint"):
+            fp_bundle = latest.get("institutional_footprint")
+    render_mf_footprint_section(
+        fp_bundle,
+        selected_tf=footprint_tf,
+        footprint_meta=state.get("footprint_meta"),
+    )
 
 st.subheader("Preço GC (10m) + marcadores de sinal")
 fig = build_price_chart(list(state.get("bars_10m") or []), log)

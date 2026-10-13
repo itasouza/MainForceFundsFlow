@@ -55,6 +55,10 @@ CONFIG: dict[str, Any] = {
     "contract_size_oz": 100,
     # GC CME minimum tick ($0.10) — MF institutional footprint price bins
     "tick_size": 0.10,
+    # Footprint display filter (signals still use mf_fixed AND percentile).
+    # Thin Asian tape often prints 1-lots — mf_only=True leaves the chart empty.
+    "footprint_mf_only": False,
+    "mf_footprint_min_contracts": 1,
     # NinjaTrader tick feed
     # "zmq" = AddOn GcTickPublisher (NetMQ PUB, production)
     # "tcp" = Indicator GC Tick Publisher (JSON lines, fallback)
