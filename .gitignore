@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+.python-version
+
+# Runtime / local state
+signal_state.json
+signal_state.tmp
+*.tmp
+_upload_ticks.csv
+gc_main_force/signal_state.json
+gc_main_force/_upload_ticks.csv
+results.csv
+
+# IDE / OS
+.idea/
+.vscode/
+.cursor/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# NinjaTrader local copies (source lives in repo)
+*.nupkg
