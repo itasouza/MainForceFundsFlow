@@ -27,6 +27,14 @@ from dashboard.components import (
     signal_log_table,
 )
 from dashboard.i18n import regime_label, session_label, source_label, t
+from dashboard.playbook_panel import (
+    badge_html,
+    market_context,
+    primary_rule,
+    render_contextual_alerts,
+    render_playbook,
+)
+from dashboard.trade_journal import load_memory, render_stats, render_trade_form
 from python_engine.config import get_config
 from python_engine.incremental_engine import run_incremental_on_ticks
 from python_engine.regime_classifier import load_ai_controls, save_ai_controls
@@ -186,6 +194,9 @@ log = filter_log_by_session(list(state.get("signal_log") or []), session_filter)
 latest = state.get("latest_signal")
 if session_filter != "all" and log:
     latest = log[-1]
+memory = load_memory(_ROOT)
+mentor = market_context(state, latest, memory["trades"])
+active_rule = primary_rule(mentor)
 
 # ---------- Header (barra compacta) ----------
 head_left, head_right = st.columns([2, 3], vertical_alignment="center")
@@ -298,6 +309,7 @@ with head_left:
     "<span style='font-size:1.3rem;font-weight:700'>🥇 GC Main Force Flow</span>"
     f"<span style='font-weight:600'>{status}</span>"
     f"<span style='background:{sig_color};color:#fff;font-weight:700;padding:.3rem .9rem;border-radius:8px'>{sig_txt}</span>"
+    f"{badge_html(active_rule)}"
     f"<span style='font-size:.75rem;opacity:.55'>{ts.lstrip(' · ')}</span>"
     "</div>",
     unsafe_allow_html=True,
@@ -311,10 +323,13 @@ if state.get("live") and not state.get("latest_signal"):
     st.info(t("info.waiting_close"))
 if not state.get("live") and (state.get("tick_count") or 0) == 0:
     st.warning(t("warn.no_ticks"))
+render_contextual_alerts(mentor)
 render_divergence(latest)
 
 # ---------- Abas ----------
-tab_op, tab_chart, tab_log = st.tabs([t("tab.op"), t("tab.chart"), t("tab.log")])
+tab_op, tab_chart, tab_log, tab_mentor = st.tabs(
+    [t("tab.op"), t("tab.chart"), t("tab.log"), t("tab.mentor")]
+)
 
 fp_bundle = None
 if show_footprint:
@@ -364,10 +379,21 @@ with tab_log:
             mime="text/csv",
         )
 
+with tab_mentor:
+    sub_playbook, sub_journal, sub_stats = st.tabs(
+        [t("tab.playbook"), t("tab.journal"), t("tab.stats")]
+    )
+    with sub_playbook:
+        render_playbook(mentor)
+    with sub_journal:
+        render_trade_form(_ROOT, state)
+    with sub_stats:
+        render_stats(_ROOT)
+
 engine_mode = state.get("engine") or "—"
 st.caption(t("footer", state=STATE_PATH.name, engine=engine_mode))
 
 # Auto-refresh in live view (3s — state disk writes are heartbeat/10m, not 0.5s)
-if ui_mode == "live" and not pause:
+if ui_mode == "live" and not pause and not st.session_state.get("journal_form_open"):
     time.sleep(3.0)
     st.rerun()

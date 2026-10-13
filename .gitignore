@@ -17,6 +17,8 @@ signal_state.tmp
 *.tmp
 _upload_ticks.csv
 gc_main_force/signal_state.json
+gc_main_force/trader_memory.json
+trader_memory.json
 gc_main_force/_upload_ticks.csv
 results.csv
 
