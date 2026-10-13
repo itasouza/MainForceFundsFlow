@@ -14,6 +14,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from dashboard.auth import require_login
 from dashboard.components import (
     fmt_br,
     build_price_chart,
@@ -34,7 +35,7 @@ from dashboard.playbook_panel import (
     render_contextual_alerts,
     render_playbook,
 )
-from dashboard.trade_journal import load_memory, render_stats, render_trade_form
+from dashboard.trade_journal import load_memory, open_trade_button, render_stats, render_trade_form
 from python_engine.config import get_config
 from python_engine.incremental_engine import run_incremental_on_ticks
 from python_engine.regime_classifier import load_ai_controls, save_ai_controls
@@ -47,6 +48,7 @@ st.set_page_config(
     page_icon="🥇",
     layout="wide",
 )
+require_login()
 
 cfg = get_config()
 STATE_PATH = _ROOT / cfg["state_file"]
@@ -112,6 +114,9 @@ if st.session_state.get("ui_mode") not in ("live", "backtest"):
     st.session_state["ui_mode"] = "live"
 
 st.sidebar.title(t("sidebar.title"))
+if st.sidebar.button(t("login.out")):
+    st.session_state["logged_in"] = False
+    st.rerun()
 ui_mode = st.sidebar.selectbox(
     t("view_mode"),
     ["live", "backtest"],
@@ -298,7 +303,6 @@ tiles = "".join(
         _tile(t("tile.session"), session_name, t("ticks_n", n=state.get("tick_count", 0))),
         _tile(t("tile.regime"), regime_txt, t("source_line", source=source_label(regime.get("source", "—")))),
         _tile(t("tile.paused"), grid_html, t("mf_floor", n=thr.get("mf_fixed_threshold_contracts", "—"))),
-        _tile(t("tile.thresholds"), thr_txt),
     ]
 )
 ts = f" · {fmt_br(latest.get('timestamp'))} ({t('brasilia')})" if latest else ""
@@ -314,11 +318,18 @@ with head_left:
     "</div>",
     unsafe_allow_html=True,
   )
-st.markdown(
-    "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:.5rem;margin-bottom:.8rem'>"
-    f"{tiles}</div>",
-    unsafe_allow_html=True,
-)
+tiles_col, limits_col, trade_col = st.columns([4.4, 1.05, 1.35], vertical_alignment="center")
+with tiles_col:
+    st.markdown(
+        "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:.5rem'>"
+        f"{tiles}</div>",
+        unsafe_allow_html=True,
+    )
+with limits_col:
+    st.markdown(_tile(t("tile.thresholds"), thr_txt), unsafe_allow_html=True)
+with trade_col:
+    open_trade_button()
+render_trade_form(_ROOT, state)
 if state.get("live") and not state.get("latest_signal"):
     st.info(t("info.waiting_close"))
 if not state.get("live") and (state.get("tick_count") or 0) == 0:
@@ -386,7 +397,7 @@ with tab_mentor:
     with sub_playbook:
         render_playbook(mentor)
     with sub_journal:
-        render_trade_form(_ROOT, state)
+        st.caption(t("journal.near_limits"))
     with sub_stats:
         render_stats(_ROOT)
 

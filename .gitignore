@@ -14,6 +14,7 @@ venv/
 # Runtime / local state
 signal_state.json
 signal_state.tmp
+signal_state.before_restart.json
 *.tmp
 _upload_ticks.csv
 gc_main_force/signal_state.json
@@ -32,6 +33,7 @@ Thumbs.db
 
 # Streamlit
 .streamlit/secrets.toml
+gc_main_force/.streamlit/secrets.toml
 
 # NinjaTrader local copies (source lives in repo)
 *.nupkg

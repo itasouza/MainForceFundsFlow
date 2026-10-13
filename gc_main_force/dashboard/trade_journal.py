@@ -134,40 +134,50 @@ def _fmt_rate(value: float | None) -> str:
     return f"{value * 100:.0f}%"
 
 
-def render_trade_form(root: Path, state: dict[str, Any]) -> None:
-    if st.button(t("journal.open"), key="journal_open_btn"):
+def open_trade_button() -> None:
+    if st.button(t("journal.open"), key="journal_open_btn", use_container_width=True):
         st.session_state["journal_form_open"] = True
+
+
+def render_trade_form(root: Path, state: dict[str, Any]) -> None:
     if not st.session_state.get("journal_form_open"):
         return
 
-    st.info(t("journal.paused"))
+    st.caption(t("journal.paused"))
     default_px = state.get("last_price")
     with st.form("manual_trade_form", clear_on_submit=True):
-        direction = st.radio(
-            t("journal.direction"),
-            ["long", "short"],
-            format_func=lambda code: t(f"journal.{code}"),
-            horizontal=True,
-        )
-        entry = st.number_input(
-            t("journal.entry"),
-            value=float(default_px) if default_px is not None else 0.0,
-            step=0.1,
-            format="%.2f",
-        )
-        exit_price = st.number_input(
-            t("journal.exit"),
-            value=0.0,
-            step=0.1,
-            format="%.2f",
-        )
-        followed = st.checkbox(t("journal.followed"), value=True)
-        rule_used = st.selectbox(
-            t("journal.rule"),
-            [rule["id"] for rule in PLAYBOOK_RULES],
-            format_func=lambda rule_id: f"#{rule_id} · {t(f'pb.{rule_id}.title')}",
-        )
-        notes = st.text_area(t("journal.notes"))
+        direction_col, entry_col, exit_col = st.columns(3)
+        with direction_col:
+            direction = st.radio(
+                t("journal.direction"),
+                ["long", "short"],
+                format_func=lambda code: t(f"journal.{code}"),
+                horizontal=True,
+            )
+        with entry_col:
+            entry = st.number_input(
+                t("journal.entry"),
+                value=float(default_px) if default_px is not None else 0.0,
+                step=0.1,
+                format="%.2f",
+            )
+        with exit_col:
+            exit_price = st.number_input(
+                t("journal.exit"),
+                value=0.0,
+                step=0.1,
+                format="%.2f",
+            )
+        follow_col, rule_col = st.columns([1, 2])
+        with follow_col:
+            followed = st.checkbox(t("journal.followed"), value=True)
+        with rule_col:
+            rule_used = st.selectbox(
+                t("journal.rule"),
+                [rule["id"] for rule in PLAYBOOK_RULES],
+                format_func=lambda rule_id: f"#{rule_id} · {t(f'pb.{rule_id}.title')}",
+            )
+        notes = st.text_area(t("journal.notes"), height=68)
         save_col, cancel_col = st.columns(2)
         save = save_col.form_submit_button(t("journal.save"))
         cancel = cancel_col.form_submit_button(t("journal.cancel"))
