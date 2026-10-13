@@ -15,7 +15,6 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from dashboard.components import (
-    SIGNAL_LABELS,
     fmt_br,
     build_price_chart,
     render_divergence,
@@ -24,8 +23,10 @@ from dashboard.components import (
     render_signal_panel,
     render_status_header,
     render_tf_columns,
+    signal_badge,
     signal_log_table,
 )
+from dashboard.i18n import regime_label, session_label, source_label, t
 from python_engine.config import get_config
 from python_engine.incremental_engine import run_incremental_on_ticks
 from python_engine.regime_classifier import load_ai_controls, save_ai_controls
@@ -88,53 +89,63 @@ def run_local_backtest(csv_bytes: bytes, overrides: dict) -> dict:
 
 
 # ---------- Sidebar ----------
-st.sidebar.title("Controles")
+if st.session_state.get("lang") not in ("pt", "en"):
+    st.session_state["lang"] = "pt"
 THEMES = {
-    "Padrão": ("#0e1117", "#262730", "#f5b301"),
-    "Azul-marinho": ("#0b1220", "#111a2e", "#f5b301"),
-    "Preto": ("#000000", "#0a0a0a", "#f5b301"),
-    "Grafite": ("#1a1d23", "#23272f", "#f5b301"),
-    "Esmeralda": ("#0a1410", "#10201a", "#34d399"),
+    "default": ("#0e1117", "#262730", "#f5b301"),
+    "navy": ("#0b1220", "#111a2e", "#f5b301"),
+    "black": ("#000000", "#0a0a0a", "#f5b301"),
+    "graphite": ("#1a1d23", "#23272f", "#f5b301"),
+    "emerald": ("#0a1410", "#10201a", "#34d399"),
 }
+if st.session_state.get("theme_name") not in THEMES:
+    st.session_state["theme_name"] = "default"
+if st.session_state.get("ui_mode") not in ("live", "backtest"):
+    st.session_state["ui_mode"] = "live"
+
+st.sidebar.title(t("sidebar.title"))
 ui_mode = st.sidebar.selectbox(
-    "Modo de visualização",
-    ["Live Mode (NinjaTrader / engine)", "Backtest Mode (CSV)"],
+    t("view_mode"),
+    ["live", "backtest"],
+    format_func=lambda code: t(f"mode.{code}"),
+    key="ui_mode",
 )
-pause = st.sidebar.checkbox("Pausar atualizações ao vivo", value=False)
+pause = st.sidebar.checkbox(t("pause_live"), value=False)
 
-with st.sidebar.expander("Thresholds", expanded=False):
-    mf_thr = st.slider("Main Force min. contratos (GC)", 1, 50, int(cfg["mf_fixed_threshold_contracts"]))
-    thr_1h = st.slider("Threshold 1H", 0.05, 0.50, float(cfg["threshold_1h"]), 0.01)
-    thr_30 = st.slider("Threshold 30m", 0.05, 0.50, float(cfg["threshold_30m"]), 0.01)
-    thr_10 = st.slider("Threshold 10m", 0.05, 0.60, float(cfg["threshold_10m"]), 0.01)
-    roll_h = st.slider("Janela percentil (horas)", 1, 48, int(cfg["rolling_window_hours"]))
+with st.sidebar.expander(t("exp.thresholds"), expanded=False):
+    mf_thr = st.slider(t("mf_min"), 1, 50, int(cfg["mf_fixed_threshold_contracts"]))
+    thr_1h = st.slider(t("thr_1h"), 0.05, 0.50, float(cfg["threshold_1h"]), 0.01)
+    thr_30 = st.slider(t("thr_30"), 0.05, 0.50, float(cfg["threshold_30m"]), 0.01)
+    thr_10 = st.slider(t("thr_10"), 0.05, 0.60, float(cfg["threshold_10m"]), 0.01)
+    roll_h = st.slider(t("roll_h"), 1, 48, int(cfg["rolling_window_hours"]))
 
-with st.sidebar.expander("Footprint", expanded=False):
+with st.sidebar.expander(t("exp.footprint"), expanded=False):
     show_footprint = st.checkbox(
-        "Mostrar Rastro Institucional (LHB)",
+        t("show_fp"),
         value=True,
-        help="Mapa por preço: onde o fluxo agride (Lee-Ready). Sinal MF continua com threshold fixo.",
+        help=t("show_fp_help"),
     )
 
 
 AI_CONTROLS_PATH = _ROOT / str(cfg.get("ai_controls_file", "ai_controls.json"))
 _controls = load_ai_controls(AI_CONTROLS_PATH)
-with st.sidebar.expander("IA — Regime / Kill Switch", expanded=False):
-    ai_enabled = st.toggle("IA de regime ativa", value=bool(_controls.get("ai_enabled", True)))
+with st.sidebar.expander(t("exp.ai"), expanded=False):
+    ai_enabled = st.toggle(t("ai_on"), value=bool(_controls.get("ai_enabled", True)))
     force_opt = st.selectbox(
-        "Forçar regime manual",
-        options=["auto", "0 — Chop", "1 — Standard/Trend", "2 — High Vol/News"],
+        t("force_regime"),
+        options=["auto", "0", "1", "2"],
+        format_func=lambda code: t(f"regime_opt.{code}"),
         index=0
         if _controls.get("force_regime") is None
         else int(_controls.get("force_regime", 1)) + 1,
     )
     pause_grid = st.toggle(
-        "Pausar sinal (override)",
+        t("pause_signal"),
         value=bool(_controls.get("pause_grid", False)),
-        help="Kill switch humano: força pausa do sinal / novas entradas independentemente da IA.",
+        help=t("pause_signal_help"),
     )
-    if st.button("Aplicar controles IA"):
-        force_regime = None if force_opt.startswith("auto") else int(force_opt[0])
+    if st.button(t("apply_ai")):
+        force_regime = None if force_opt == "auto" else int(force_opt)
         save_ai_controls(
             AI_CONTROLS_PATH,
             {
@@ -143,18 +154,12 @@ with st.sidebar.expander("IA — Regime / Kill Switch", expanded=False):
                 "pause_grid": pause_grid,
             },
         )
-        st.success("Controles salvos — aplicados no próximo fechamento 1H.")
+        st.success(t("ai_saved"))
 
 session_filter = st.sidebar.selectbox(
-    "Filtro de sessão",
+    t("session_filter"),
     ["all", "asian", "london", "new_york", "off_hours"],
-    format_func=lambda x: {
-        "all": "Todas",
-        "asian": "Asian (18:00–01:00 ET)",
-        "london": "London (01:00–08:00 ET)",
-        "new_york": "New York (08:00–17:00 ET)",
-        "off_hours": "Off hours",
-    }.get(x, x),
+    format_func=session_label,
 )
 
 overrides = {
@@ -166,13 +171,13 @@ overrides = {
 }
 
 uploaded = None
-if ui_mode.startswith("Backtest"):
-    uploaded = st.sidebar.file_uploader("CSV de ticks", type=["csv"])
-    if uploaded and st.sidebar.button("Processar CSV"):
+if ui_mode == "backtest":
+    uploaded = st.sidebar.file_uploader(t("csv_upload"), type=["csv"])
+    if uploaded and st.sidebar.button(t("process_csv")):
         st.session_state["bt_state"] = run_local_backtest(uploaded.getvalue(), overrides)
 
 # ---------- Load state ----------
-if ui_mode.startswith("Backtest") and "bt_state" in st.session_state:
+if ui_mode == "backtest" and "bt_state" in st.session_state:
     state = st.session_state["bt_state"]
 else:
     state = load_engine_state()
@@ -185,14 +190,27 @@ if session_filter != "all" and log:
 # ---------- Header (barra compacta) ----------
 head_left, head_right = st.columns([2, 3], vertical_alignment="center")
 with head_right:
-    theme_name = st.pills(
-        "Tema",
-        list(THEMES),
-        default="Padrão",
-        selection_mode="single",
-        key="theme_name",
-        label_visibility="collapsed",
-    ) or "Padrão"
+    if st.session_state.get("theme_name") not in THEMES:
+        st.session_state["theme_name"] = "default"
+    lang_col, theme_col = st.columns([1, 2], vertical_alignment="center")
+    with lang_col:
+        st.pills(
+            t("language"),
+            ["pt", "en"],
+            format_func=lambda code: t(f"lang.{code}"),
+            selection_mode="single",
+            key="lang",
+            label_visibility="collapsed",
+        )
+    with theme_col:
+        theme_name = st.pills(
+            t("theme"),
+            list(THEMES),
+            format_func=lambda code: t(f"theme.{code}"),
+            selection_mode="single",
+            key="theme_name",
+            label_visibility="collapsed",
+        ) or "default"
 theme_bg, theme_side, theme_accent = THEMES[theme_name]
 st.markdown(
     "<style>.block-container{padding-top:2.5rem;padding-bottom:1rem}"
@@ -212,19 +230,19 @@ regime = state.get("regime") or {}
 thr = state.get("thresholds") or {}
 mode = state.get("mode", "idle")
 if mode == "live" and state.get("live"):
-    status = "🟢 LIVE"
+    status = t("status.live")
 elif mode == "live":
-    status = "🟡 LIVE (sem ticks)"
+    status = t("status.live_stale")
 elif mode == "backtest":
-    status = "🔴 BACKTEST"
+    status = t("status.backtest")
 else:
-    status = "⚪ IDLE"
+    status = t("status.idle")
 
 if latest:
-    sig_label, sig_color = SIGNAL_LABELS.get(int(latest.get("composite_signal", 0)), SIGNAL_LABELS[0])
+    sig_label, sig_color = signal_badge(int(latest.get("composite_signal", 0)))
     sig_txt = f"{sig_label} · {float(latest.get('confidence_score', 0)) * 100:.0f}%"
 else:
-    sig_txt, sig_color = "AGUARDANDO SINAL", "#6b7280"
+    sig_txt, sig_color = t("awaiting_signal"), "#6b7280"
 
 price = state.get("last_price")
 open_px = state.get("session_open_price")
@@ -237,7 +255,9 @@ else:
         px_html += f" <span style='color:{'#16a34a' if chg >= 0 else '#dc2626'}'>{chg:+.2f}%</span>"
 
 
-regime_txt = f"{regime.get('regime', '—')} · {regime.get('label', '—')}"
+regime_txt = (
+    f"{regime.get('regime', '—')} · {regime_label(regime.get('label'), regime.get('regime'))}"
+)
 thr_txt = (
     f"<span style='font-size:.8rem'>1H {thr.get('threshold_1h', '—')}<br>"
     f"30m {thr.get('threshold_30m', '—')}<br>10m {thr.get('threshold_10m', '—')}</span>"
@@ -256,18 +276,21 @@ def _tile(label: str, value: str, sub: str = "") -> str:
 
 
 grid_html = (
-    "<span style='color:#dc2626'>SIM</span>" if grid_paused else "<span style='color:#16a34a'>NÃO</span>"
+    f"<span style='color:#dc2626'>{t('yes')}</span>"
+    if grid_paused
+    else f"<span style='color:#16a34a'>{t('no')}</span>"
 )
+session_name = session_label(state.get("active_session")) if state.get("active_session") else "—"
 tiles = "".join(
     [
-        _tile("Preço GC", px_html),
-        _tile("Sessão (ET)", str(state.get("active_session") or "—").upper(), f"{state.get('tick_count', 0)} ticks"),
-        _tile("Regime IA", regime_txt, f"fonte: {regime.get('source', '—')}"),
-        _tile("Sinal pausado", grid_html, f"MF floor {thr.get('mf_fixed_threshold_contracts', '—')} cts"),
-        _tile("Thresholds", thr_txt),
+        _tile(t("tile.price"), px_html),
+        _tile(t("tile.session"), session_name, t("ticks_n", n=state.get("tick_count", 0))),
+        _tile(t("tile.regime"), regime_txt, t("source_line", source=source_label(regime.get("source", "—")))),
+        _tile(t("tile.paused"), grid_html, t("mf_floor", n=thr.get("mf_fixed_threshold_contracts", "—"))),
+        _tile(t("tile.thresholds"), thr_txt),
     ]
 )
-ts = f" · {fmt_br(latest.get('timestamp'))} (Brasília)" if latest else ""
+ts = f" · {fmt_br(latest.get('timestamp'))} ({t('brasilia')})" if latest else ""
 
 with head_left:
   st.markdown(
@@ -285,19 +308,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 if state.get("live") and not state.get("latest_signal"):
-    st.info(
-        "Recebendo ticks do NinjaTrader. O sinal composto aparece após o "
-        "fechamento da primeira barra 10m (e alinhamento 30m/1H)."
-    )
+    st.info(t("info.waiting_close"))
 if not state.get("live") and (state.get("tick_count") or 0) == 0:
-    st.warning(
-        "Sem ticks no estado. Confirme no Ninja: indicador GC Tick Publisher (TCP) "
-        "com LISTENING e tps>0, e o engine Python em modo live."
-    )
+    st.warning(t("warn.no_ticks"))
 render_divergence(latest)
 
 # ---------- Abas ----------
-tab_op, tab_chart, tab_log = st.tabs(["Operação", "Gráficos", "Log de sinais"])
+tab_op, tab_chart, tab_log = st.tabs([t("tab.op"), t("tab.chart"), t("tab.log")])
 
 fp_bundle = None
 if show_footprint:
@@ -310,12 +327,12 @@ if show_footprint:
             fp_bundle = latest.get("institutional_footprint")
 
 with tab_op:
-    st.subheader("Análise Multi-Timeframe")
+    st.subheader(t("mtf.title"))
     render_tf_columns(latest)
     if show_footprint:
         st.markdown("<div style='height:2rem'></div>", unsafe_allow_html=True)
         footprint_tf = st.pills(
-            "Timeframe do Footprint",
+            t("fp.timeframe"),
             ["10m", "30m", "1H"],
             default="10m",
             selection_mode="single",
@@ -329,7 +346,7 @@ with tab_op:
         )
 
 with tab_chart:
-    st.subheader("Preço GC (10m) + marcadores de sinal")
+    st.subheader(t("chart.title"))
     fig = build_price_chart(list(state.get("bars_10m") or []), log)
     fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
     st.plotly_chart(fig, use_container_width=True)
@@ -337,23 +354,20 @@ with tab_chart:
 with tab_log:
     table = signal_log_table(log)
     if table.empty:
-        st.info("Sem sinais ainda.")
+        st.info(t("log.empty"))
     else:
         st.dataframe(table, use_container_width=True, height=480)
         st.download_button(
-            "Exportar log CSV",
+            t("log.export"),
             data=table.to_csv(index=False).encode("utf-8"),
             file_name="gc_mf_signal_log.csv",
             mime="text/csv",
         )
 
 engine_mode = state.get("engine") or "—"
-st.caption(
-    "Arquitetura: NinjaTrader (TCP :5556) → Python engine incremental → sinais ZMQ :5555 + dashboard. "
-    f"Estado: `{STATE_PATH.name}` · engine={engine_mode}"
-)
+st.caption(t("footer", state=STATE_PATH.name, engine=engine_mode))
 
 # Auto-refresh in live view (3s — state disk writes are heartbeat/10m, not 0.5s)
-if ui_mode.startswith("Live") and not pause:
+if ui_mode == "live" and not pause:
     time.sleep(3.0)
     st.rerun()
