@@ -346,6 +346,7 @@ class IncrementalMTFEngine:
                 "fp_min": self.fp_min,
                 "mf_fixed": self.mf_fixed,
                 "mf_dynamic": round(float(self.dynamic_percentile_value), 4),
+                "tick_size": self.tick_size,
             },
         }
 
