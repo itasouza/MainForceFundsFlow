@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import select
 import socket
 import threading
 import time
@@ -92,6 +93,10 @@ class NtTickSubscriberTcp:
             return None
         while "\n" not in self._buf:
             try:
+                self._sock.settimeout(self._timeout)
+                ready, _, _ = select.select([self._sock], [], [], self._timeout)
+                if not ready:
+                    return None
                 chunk = self._sock.recv(4096)
             except socket.timeout:
                 return None

@@ -128,15 +128,46 @@ def add_trade(root: Path, trade: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def open_trade_indexes(trades: list[dict[str, Any]]) -> list[int]:
+    return [index for index, row in enumerate(trades) if row.get("pnl_ticks") is None]
+
+
+def close_trade(root: Path, index: int, exit_price: float, note: str = "") -> dict[str, Any]:
+    data = load_memory(root)
+    trades = data["trades"]
+    if index < 0 or index >= len(trades) or trades[index].get("pnl_ticks") is not None:
+        raise ValueError("open trade not found")
+    trade = trades[index]
+    trade["exit_price"] = round(float(exit_price), 2)
+    trade["pnl_ticks"] = pnl_ticks(str(trade.get("direction") or "long"), float(trade["entry_price"]), float(exit_price))
+    trade["closed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    extra = note.strip()
+    if extra:
+        previous = str(trade.get("notes") or "").strip()
+        trade["notes"] = f"{previous}\n{extra}".strip() if previous else extra
+    save_memory(root, data)
+    return data
+
+
 def _fmt_rate(value: float | None) -> str:
     if value is None:
         return t("stats.none")
     return f"{value * 100:.0f}%"
 
 
-def open_trade_button() -> None:
+def open_trade_button(trades: list[dict[str, Any]]) -> None:
     if st.button(t("journal.open"), key="journal_open_btn", use_container_width=True):
         st.session_state["journal_form_open"] = True
+        st.session_state["journal_close_open"] = False
+    has_open = bool(open_trade_indexes(trades))
+    if st.button(
+        t("journal.close_btn"),
+        key="journal_close_btn",
+        use_container_width=True,
+        disabled=not has_open,
+    ):
+        st.session_state["journal_close_open"] = True
+        st.session_state["journal_form_open"] = False
 
 
 def render_trade_form(root: Path, state: dict[str, Any]) -> None:
@@ -206,6 +237,64 @@ def render_trade_form(root: Path, state: dict[str, Any]) -> None:
     add_trade(root, trade)
     st.session_state["journal_form_open"] = False
     st.success(t("journal.saved"))
+    st.rerun()
+
+
+def _trade_label(row: dict[str, Any]) -> str:
+    side = t(f"journal.{row.get('direction', 'long')}")
+    return f"{side} @ {float(row.get('entry_price') or 0):.2f}"
+
+
+def render_close_form(root: Path, state: dict[str, Any]) -> None:
+    if not st.session_state.get("journal_close_open"):
+        return
+
+    data = load_memory(root)
+    indexes = open_trade_indexes(data["trades"])
+    if not indexes:
+        st.session_state["journal_close_open"] = False
+        st.warning(t("journal.none_open"))
+        return
+
+    st.caption(t("journal.paused"))
+    default_px = state.get("last_price")
+    with st.form("close_trade_form", clear_on_submit=True):
+        chosen = indexes[-1]
+        if len(indexes) == 1:
+            st.write(f"**{t('journal.closing')}:** {_trade_label(data['trades'][chosen])}")
+        else:
+            chosen = st.selectbox(
+                t("journal.which_open"),
+                indexes,
+                index=len(indexes) - 1,
+                format_func=lambda idx: _trade_label(data["trades"][idx]),
+            )
+        exit_price = st.number_input(
+            t("journal.exit_now"),
+            value=float(default_px) if default_px is not None else 0.0,
+            step=0.1,
+            format="%.2f",
+        )
+        note = st.text_area(t("journal.notes"), height=68, key="close_notes")
+        save_col, cancel_col = st.columns(2)
+        save = save_col.form_submit_button(t("journal.close_save"))
+        cancel = cancel_col.form_submit_button(t("journal.cancel"))
+
+    if cancel:
+        st.session_state["journal_close_open"] = False
+        st.rerun()
+    if not save:
+        return
+    if exit_price <= 0:
+        st.error(t("journal.need_exit"))
+        return
+    try:
+        close_trade(root, int(chosen), float(exit_price), note)
+    except ValueError:
+        st.error(t("journal.none_open"))
+        return
+    st.session_state["journal_close_open"] = False
+    st.success(t("journal.closed"))
     st.rerun()
 
 

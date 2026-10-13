@@ -207,13 +207,11 @@ def _incremental_recv_loop(
     while not stop.is_set():
         tick = sub.recv_tick()
         if tick is None:
-            if last_tick_mono and (time.monotonic() - last_tick_mono) > 5.0:
-                now = time.monotonic()
-                if now - last_persist >= heartbeat_sec:
-                    store.update(persist=True, live=False)
-                    last_persist = now
-                else:
-                    store.update(persist=False, live=False)
+            now = time.monotonic()
+            quiet = (not last_tick_mono) or (now - last_tick_mono) > 5.0
+            if quiet and now - last_persist >= heartbeat_sec:
+                store.update(persist=True, live=False)
+                last_persist = now
             continue
         if tick["volume"] <= 0:
             continue

@@ -35,7 +35,13 @@ from dashboard.playbook_panel import (
     render_contextual_alerts,
     render_playbook,
 )
-from dashboard.trade_journal import load_memory, open_trade_button, render_stats, render_trade_form
+from dashboard.trade_journal import (
+    load_memory,
+    open_trade_button,
+    render_close_form,
+    render_stats,
+    render_trade_form,
+)
 from python_engine.config import get_config
 from python_engine.incremental_engine import run_incremental_on_ticks
 from python_engine.regime_classifier import load_ai_controls, save_ai_controls
@@ -54,8 +60,30 @@ cfg = get_config()
 STATE_PATH = _ROOT / cfg["state_file"]
 
 
+ENGINE_STALE_SEC = 30
+
+
 def load_engine_state() -> dict:
     return EngineStateStore(STATE_PATH).load()
+
+
+def state_age_seconds(path: Path) -> float | None:
+    """Seconds since the engine last wrote the state file. None if the file is missing."""
+    try:
+        return max(0.0, time.time() - path.stat().st_mtime)
+    except OSError:
+        return None
+
+
+def format_age(seconds: float) -> str:
+    whole = max(0, int(seconds))
+    if whole < 60:
+        return t("age.sec", n=whole)
+    minutes = whole // 60
+    if minutes < 60:
+        return t("age.min", n=minutes)
+    hours, mins = divmod(minutes, 60)
+    return t("age.hour", h=hours, m=mins)
 
 
 def filter_log_by_session(log: list[dict], session_filter: str) -> list[dict]:
@@ -245,7 +273,11 @@ st.markdown(
 regime = state.get("regime") or {}
 thr = state.get("thresholds") or {}
 mode = state.get("mode", "idle")
-if mode == "live" and state.get("live"):
+state_age = state_age_seconds(STATE_PATH) if ui_mode == "live" else None
+engine_down = ui_mode == "live" and (state_age is None or state_age > ENGINE_STALE_SEC)
+if engine_down:
+    status = t("status.engine_down")
+elif mode == "live" and state.get("live"):
     status = t("status.live")
 elif mode == "live":
     status = t("status.live_stale")
@@ -253,6 +285,11 @@ elif mode == "backtest":
     status = t("status.backtest")
 else:
     status = t("status.idle")
+age_html = ""
+if ui_mode == "live" and state_age is not None and not engine_down:
+    age_html = (
+        f"<span style='font-size:.75rem;opacity:.7'>{t('status.engine_ok', age=format_age(state_age))}</span>"
+    )
 
 if latest:
     sig_label, sig_color = signal_badge(int(latest.get("composite_signal", 0)))
@@ -314,11 +351,26 @@ with head_left:
     f"<span style='font-weight:600'>{status}</span>"
     f"<span style='background:{sig_color};color:#fff;font-weight:700;padding:.3rem .9rem;border-radius:8px'>{sig_txt}</span>"
     f"{badge_html(active_rule)}"
+    f"{age_html}"
     f"<span style='font-size:.75rem;opacity:.55'>{ts.lstrip(' · ')}</span>"
     "</div>",
     unsafe_allow_html=True,
   )
-tiles_col, limits_col, trade_col = st.columns([4.4, 1.05, 1.35], vertical_alignment="center")
+if ui_mode == "live":
+    ticks_now = int(state.get("tick_count") or 0)
+    if st.session_state.get("_ticks_mark") != ticks_now:
+        st.session_state["_ticks_mark"] = ticks_now
+        st.session_state["_ticks_mark_at"] = time.time()
+    ticks_quiet = time.time() - float(st.session_state.get("_ticks_mark_at") or time.time())
+else:
+    ticks_quiet = 0.0
+tape_stopped = ui_mode == "live" and not engine_down and ticks_quiet > ENGINE_STALE_SEC
+if engine_down:
+    age_txt = format_age(state_age) if state_age is not None else t("age.unknown")
+    st.error(t("alert.engine_down", age=age_txt))
+elif tape_stopped:
+    st.warning(t("alert.tape_stopped", age=format_age(ticks_quiet)))
+tiles_col, limits_col, trade_col = st.columns([4.2, 1.05, 1.55], vertical_alignment="center")
 with tiles_col:
     st.markdown(
         "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:.5rem'>"
@@ -328,8 +380,9 @@ with tiles_col:
 with limits_col:
     st.markdown(_tile(t("tile.thresholds"), thr_txt), unsafe_allow_html=True)
 with trade_col:
-    open_trade_button()
+    open_trade_button(memory["trades"])
 render_trade_form(_ROOT, state)
+render_close_form(_ROOT, state)
 if state.get("live") and not state.get("latest_signal"):
     st.info(t("info.waiting_close"))
 if not state.get("live") and (state.get("tick_count") or 0) == 0:
@@ -405,6 +458,7 @@ engine_mode = state.get("engine") or "—"
 st.caption(t("footer", state=STATE_PATH.name, engine=engine_mode))
 
 # Auto-refresh in live view (3s — state disk writes are heartbeat/10m, not 0.5s)
-if ui_mode == "live" and not pause and not st.session_state.get("journal_form_open"):
+form_open = st.session_state.get("journal_form_open") or st.session_state.get("journal_close_open")
+if ui_mode == "live" and not pause and not form_open:
     time.sleep(3.0)
     st.rerun()
