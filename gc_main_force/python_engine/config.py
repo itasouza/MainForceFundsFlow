@@ -33,7 +33,8 @@ CONFIG: dict[str, Any] = {
     "live_engine": "incremental",  # "incremental" (default) | "batch"
     "percentile_recompute_ticks": 1000,
     "volume_buffer_maxlen": 20000,
-    "heartbeat_persist_sec": 5.0,  # disk write cadence for live price/status
+    # Disk I/O: signal_state.json is written ONLY on 10m bar close (not every tick/heartbeat)
+    "heartbeat_persist_sec": 0.0,
     "state_file": "signal_state.json",
     # Dashboard
     "dashboard_port": 8501,

@@ -139,7 +139,7 @@ def _engine_recompute(
 
 
 def run_live_incremental(cfg: dict, store: EngineStateStore) -> None:
-    """High-performance live path: O(1) per tick, disk write on heartbeat / 10m close."""
+    """High-performance live path: O(1) per tick; disk write ONLY on 10m bar close."""
     transport = str(cfg.get("nt_tick_transport", "zmq"))
     sub = NtTickSubscriber(
         endpoint=str(cfg["nt_zmq_subscribe"]),
@@ -152,16 +152,16 @@ def run_live_incremental(cfg: dict, store: EngineStateStore) -> None:
     )
     engine = IncrementalMTFEngine(cfg)
     stop = threading.Event()
-    heartbeat_sec = float(cfg.get("heartbeat_persist_sec", 5.0))
 
-    store.update(mode="live", live=False, tick_count=0, engine="incremental")
+    # One-time boot write so dashboard sees mode=live before first 10m close
+    store.update(mode="live", live=False, tick_count=0, engine="incremental", persist=True)
     print(f"Listening ticks (incremental/{transport}): {cfg['nt_zmq_subscribe']} topic={cfg['nt_zmq_topic']}")
     print(f"Publishing signals: {cfg['signal_zmq_publish']} topic={cfg['signal_zmq_topic']}")
-    print(f"Heartbeat disk write every {heartbeat_sec:.1f}s; full signal on 10m bar close.")
+    print("Disk write: signal_state.json ONLY on 10m bar close (avoids Windows file locks).")
 
     t = threading.Thread(
         target=_incremental_recv_loop,
-        args=(sub, engine, store, publisher, stop, heartbeat_sec),
+        args=(sub, engine, store, publisher, stop),
         daemon=True,
     )
     t.start()
@@ -182,24 +182,23 @@ def _incremental_recv_loop(
     store: EngineStateStore,
     publisher: SignalPublisher,
     stop: threading.Event,
-    heartbeat_sec: float,
 ) -> None:
-    last_persist = 0.0
+    last_tick_mono = 0.0
     while not stop.is_set():
         tick = sub.recv_tick()
         if tick is None:
-            # Mark stale if no ticks recently
-            if engine.last_tick_ts is not None:
-                age = time.monotonic() - last_persist
-                if age > 5:
-                    store.update(persist=False, live=False)
+            if last_tick_mono and (time.monotonic() - last_tick_mono) > 5.0:
+                store.update(persist=False, live=False)
             continue
         if tick["volume"] <= 0:
             continue
+
+        last_tick_mono = time.monotonic()
         payload = engine.process_tick(tick)
         snap = engine.snapshot_state()
-        now = time.monotonic()
+
         if payload is not None:
+            # ONLY disk persistence point in the live loop
             store.push_signal(payload, persist=False)
             store.merge(snap, persist=True)
             try:
@@ -210,13 +209,10 @@ def _incremental_recv_loop(
                 f"10m close signal={payload['composite_signal']} "
                 f"conf={payload['confidence_score']} ts={payload['timestamp']}"
             )
-            last_persist = now
             continue
-        if now - last_persist >= heartbeat_sec:
-            store.merge(snap, persist=True)
-            last_persist = now
-        else:
-            store.merge(snap, persist=False)
+
+        # In-memory only between bar closes (no JSON write → no PermissionError)
+        store.merge(snap, persist=False)
 
 
 def run_live_batch(cfg: dict, store: EngineStateStore) -> None:
