@@ -112,17 +112,106 @@ def _side_from_norm(norm: float, thr: float = 0.02) -> str:
     return "flat"
 
 
+def _price_candle_side(open_px: float, close_px: float, thr_ticks: float = 0.05) -> str:
+    """OHLC candle color: close vs open (same idea as Ninja / charting platforms)."""
+    if open_px <= 0 or close_px <= 0:
+        return "flat"
+    delta = close_px - open_px
+    if delta > thr_ticks:
+        return "buy"
+    if delta < -thr_ticks:
+        return "sell"
+    return "flat"
+
+
+_TF_MINUTES = {"10m": 10, "30m": 30, "1H": 60}
+
+
+def enrich_mtf_ohlc(
+    live_mtf: dict[str, Any] | None,
+    bars_10m: list[dict[str, Any]] | None = None,
+    last_price: float | None = None,
+) -> dict[str, Any]:
+    """
+    Ensure each TF has open/close for price-candle display.
+
+    Falls back to bars_10m when the engine heartbeat still omits OHLC
+    (old process) or when open/close are zero.
+    """
+    out: dict[str, Any] = {}
+    live_mtf = live_mtf or {}
+    bars = list(bars_10m or [])
+    for key in ("10m", "30m", "1H"):
+        row = dict(live_mtf.get(key) or {})
+        open_px = float(row.get("open") or 0.0)
+        close_px = float(row.get("close") or 0.0)
+        if open_px > 0 and close_px > 0:
+            out[key] = row
+            continue
+        start = row.get("bar_start")
+        if not start or not bars:
+            if last_price and bars:
+                # Last resort: use newest 10m bar OHLC for 10m only
+                if key == "10m":
+                    last = bars[-1]
+                    row["open"] = float(last.get("open") or 0.0)
+                    row["close"] = float(last.get("close") or last_price or 0.0)
+            out[key] = row
+            continue
+        try:
+            start_ts = pd.Timestamp(start)
+            if start_ts.tzinfo is None:
+                start_ts = start_ts.tz_localize("UTC")
+            end_ts = start_ts + pd.Timedelta(minutes=_TF_MINUTES[key])
+        except (TypeError, ValueError):
+            out[key] = row
+            continue
+        window: list[dict[str, Any]] = []
+        for b in bars:
+            try:
+                bt = pd.Timestamp(b.get("timestamp"))
+                if bt.tzinfo is None:
+                    bt = bt.tz_localize("UTC")
+            except (TypeError, ValueError):
+                continue
+            if start_ts <= bt < end_ts:
+                window.append(b)
+        if window:
+            row["open"] = float(window[0].get("open") or 0.0)
+            row["close"] = float(
+                (last_price if last_price is not None else None)
+                or window[-1].get("close")
+                or 0.0
+            )
+            row["high"] = max(float(b.get("high") or 0.0) for b in window)
+            row["low"] = min(
+                float(b.get("low") or 1e18) for b in window if float(b.get("low") or 0) > 0
+            )
+            if row["low"] >= 1e17:
+                row["low"] = float(window[-1].get("low") or 0.0)
+        elif last_price is not None and key == "10m" and bars:
+            last = bars[-1]
+            row["open"] = float(last.get("open") or 0.0)
+            row["close"] = float(last_price)
+        out[key] = row
+    return out
+
+
 def render_tf_columns(
     payload: dict[str, Any] | None,
     live_mtf: dict[str, Any] | None = None,
+    bars_10m: list[dict[str, Any]] | None = None,
+    last_price: float | None = None,
 ) -> None:
     """
     Show MTF cards from open bars when ``live_mtf`` is present (heartbeat).
 
     Composite signal still comes from closed bars in ``payload`` — cards are for
     freshness so 30m/1H are not stuck on the last close for many minutes.
+    Each card shows Main Force side AND price candle side (open→close).
     """
-    live_mtf = live_mtf or {}
+    live_raw = live_mtf or {}
+    live_mtf = enrich_mtf_ohlc(live_raw, bars_10m=bars_10m, last_price=last_price)
     closed_tfs = (payload or {}).get("timeframes") or {}
     if not live_mtf and not closed_tfs:
         st.write(t("mtf.empty"))
@@ -131,45 +220,74 @@ def render_tf_columns(
     st.caption(t("mtf.caption_live"))
     if payload and payload.get("timestamp"):
         st.caption(t("mtf.signal_closed_at", ts=fmt_br(payload.get("timestamp"))))
+    with st.expander(t("mtf.docs_title"), expanded=False):
+        st.markdown(t("mtf.docs_body"))
 
     cols = st.columns(3)
+    price_disagree = False
+    _WARN = "#f59e0b"
     for col, key in zip(cols, ("10m", "30m", "1H")):
         with col:
             data = live_mtf.get(key) or closed_tfs.get(key) or {}
-            is_live = bool(data.get("live", bool(live_mtf.get(key))))
+            is_live = bool(data.get("live", bool(live_raw.get(key))))
             mf = float(data.get("mf_delta_norm", 0))
             rt = float(data.get("retail_delta_norm", 0))
             abs_delta = float(data.get("mf_delta", 0))
+            open_px = float(data.get("open") or 0.0)
+            close_px = float(data.get("close") or 0.0)
             side = _side_from_norm(mf)
             rt_side = _side_from_norm(rt)
+            px_side = _price_candle_side(open_px, close_px)
             if side == "buy":
-                color, arrow, label = _BUY, "↑", t("side.buy")
+                mf_color, arrow, label = _BUY, "↑", t("side.buy")
             elif side == "sell":
-                color, arrow, label = _SELL, "↓", t("side.sell")
+                mf_color, arrow, label = _SELL, "↓", t("side.sell")
             else:
-                color, arrow, label = _FLAT, "→", t("side.flat")
+                mf_color, arrow, label = _FLAT, "→", t("side.flat")
+            if px_side == "buy":
+                px_color, px_label = _BUY, t("mtf.price_up")
+            elif px_side == "sell":
+                px_color, px_label = _SELL, t("mtf.price_down")
+            else:
+                px_color, px_label = _FLAT, t("mtf.price_flat")
+            disagree = side != "flat" and px_side != "flat" and side != px_side
+            # Border follows price when MF and price disagree — avoids a green
+            # "compra" frame while the market candle is red.
+            border = _WARN if disagree else (px_color if px_side != "flat" else mf_color)
             rt_color = _BUY if rt_side == "buy" else (_SELL if rt_side == "sell" else _FLAT)
             badge = t("mtf.live_badge") if is_live else t("mtf.closed_badge")
             badge_color = "#38bdf8" if is_live else "#9ca3af"
-            # When MF is flat but retail leans, say so — avoids "all bought" vs NEUTRO confusion
             note = ""
             if side == "flat" and rt_side == "buy":
                 note = f"<div style='font-size:0.72rem;color:{_BUY};margin-top:.25rem'>{t('mtf.note_retail_buy')}</div>"
             elif side == "flat" and rt_side == "sell":
                 note = f"<div style='font-size:0.72rem;color:{_SELL};margin-top:.25rem'>{t('mtf.note_retail_sell')}</div>"
+            if disagree:
+                price_disagree = True
+                note += (
+                    f"<div style='font-size:0.72rem;color:{_WARN};margin-top:.25rem;font-weight:600'>"
+                    f"{t('mtf.note_mf_vs_price')}</div>"
+                )
+            px_chg = ""
+            if open_px > 0 and close_px > 0:
+                px_chg = f" ({close_px - open_px:+.2f})"
             st.markdown(
                 f"""
-                <div style="border:1px solid {color};border-radius:10px;padding:0.5rem 0.8rem;">
+                <div style="border:2px solid {border};border-radius:10px;padding:0.5rem 0.8rem;">
                   <div style="display:flex;justify-content:space-between;align-items:baseline;">
                     <b>{key}</b>
-                    <span style="color:{color};font-weight:700;font-size:0.9rem;">{arrow} {label}</span>
+                    <span style="color:{mf_color};font-weight:700;font-size:0.9rem;">{arrow} {t('mtf.mf_short')} {label}</span>
                   </div>
                   <div style="font-size:0.7rem;color:{badge_color};margin-top:.1rem;font-weight:600;">{badge} · {t('mtf.mf_label')}</div>
+                  <div style="display:flex;justify-content:space-between;font-size:0.78rem;margin-top:0.35rem;">
+                    <span><span style="opacity:.6">{t('mtf.price_label')}</span>
+                    <b style="color:{px_color}">{px_label}{px_chg}</b></span>
+                  </div>
                   <div style="display:flex;justify-content:space-between;font-size:0.8rem;margin-top:0.2rem;">
-                    <span><span style="opacity:.6">MF</span> <b style="color:{color}">{mf:+.3f}</b></span>
+                    <span><span style="opacity:.6">MF</span> <b style="color:{mf_color}">{mf:+.3f}</b></span>
                     <span><span style="opacity:.6">{t("retail")}</span> <b style="color:{rt_color}">{rt:+.3f}</b></span>
                   </div>
-                  {_diverging_bar(mf, color)}
+                  {_diverging_bar(mf, mf_color)}
                   <div style="font-size:0.75rem;opacity:.8;">{t("mf_delta", n=f"{abs_delta:+,.0f}")}</div>
                   {note}
                 </div>
@@ -177,7 +295,6 @@ def render_tf_columns(
                 unsafe_allow_html=True,
             )
 
-    # Global hint when all live MF flat but retail/footprint look one-sided
     if live_mtf:
         mf_sides = [_side_from_norm(float((live_mtf.get(k) or {}).get("mf_delta_norm", 0))) for k in ("10m", "30m", "1H")]
         rt_sides = [_side_from_norm(float((live_mtf.get(k) or {}).get("retail_delta_norm", 0))) for k in ("10m", "30m", "1H")]
@@ -185,6 +302,8 @@ def render_tf_columns(
             st.info(t("mtf.hint_retail_only_buy"))
         elif all(s == "flat" for s in mf_sides) and any(s == "sell" for s in rt_sides):
             st.info(t("mtf.hint_retail_only_sell"))
+        if price_disagree:
+            st.warning(t("mtf.hint_mf_vs_price"))
 
 
 def render_mtf_vs_footprint_note(
@@ -504,11 +623,13 @@ def render_mf_footprint_section(
     selected_tf: str = "10m",
     footprint_meta: dict[str, Any] | None = None,
     ninja_price: float | None = None,
+    compact: bool = False,
 ) -> None:
     """
     Dashboard block: institutional footprint + automatic Grid recommendation.
 
     ``ninja_price`` = last_price from engine (same print the Ninja chart shows).
+    ``compact`` = modo 3 colunas lado a lado: sem o bloco de regras, chave de gráfico por TF.
     """
     st.markdown(f"##### {t('fp.heading', tf=selected_tf)}")
     bundle = footprint_bundle or {}
@@ -611,7 +732,10 @@ def render_mf_footprint_section(
     fig = build_institutional_footprint_chart(
         primary, context_30m=ctx30, tf_label=selected_tf
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=f"fp_chart_{selected_tf}")
+
+    if compact:
+        return
 
     with st.expander(t("fp.rules_title"), expanded=False):
         if meta:

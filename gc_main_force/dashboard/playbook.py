@@ -9,12 +9,14 @@ PLAYBOOK_RULES: list[dict] = [
     {"id": 4, "trigger": "in_position", "icon": "🚪"},
     {"id": 5, "trigger": "off_session", "icon": "🕐"},
     {"id": 6, "trigger": "neutral_signal", "icon": "⛔"},
+    {"id": 7, "trigger": "live_aligned_bias", "icon": "⚡"},
 ]
 
 # Highest priority wins the header badge when several rules apply.
 TRIGGER_PRIORITY = (
-    "neutral_signal",
     "off_session",
+    "live_aligned_bias",
+    "neutral_signal",
     "divergence_detected",
     "price_near_absorption",
     "in_position",

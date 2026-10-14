@@ -103,6 +103,22 @@ Abra http://localhost:8501
 
 O dashboard lê `signal_state.json` (escrito pelo engine) e também permite **Backtest Mode** com upload de CSV.
 
+No painel (aba **Operação**), o expander **Como ler os cartões** resume a regra abaixo.
+
+### Cartões MTF: Main Force ≠ cor da vela
+
+Cada cartão no painel mostra **dois lados**:
+
+| Linha no cartão | Significado |
+|-----------------|-------------|
+| **Seta MF** | Fluxo institucional (lotes grandes, Lee-Ready) |
+| **Preço** | Cor da vela (fechamento vs abertura) — mesma lógica do gráfico |
+
+- MF norm = `(vol. MF compra − vol. MF venda) / total MF`
+- Se MF = compra e Preço = vermelha, não é bug (fluxo grande vs OHLC)
+- Cartões **AO VIVO** = barra aberta; o **sinal composto** só muda com 1H + 30m + 10m alinhados no **fechamento**
+- Engine em UTC; compare o início da barra com o eixo do gráfico
+
 ## Passo 4 — Testar sem NinjaTrader
 
 ```bash

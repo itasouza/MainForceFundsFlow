@@ -6,6 +6,7 @@ from typing import Any
 
 import streamlit as st
 
+from dashboard.components import _price_candle_side, enrich_mtf_ohlc
 from dashboard.i18n import t
 from dashboard.playbook import (
     ABSORPTION_NEAR_TICKS,
@@ -18,6 +19,7 @@ from dashboard.trade_journal import has_open_trade
 
 _TONE = {
     "neutral_signal": ("#450a0a", "#f87171"),
+    "live_aligned_bias": ("#14532d", "#4ade80"),
     "off_session": ("#713f12", "#fde68a"),
     "divergence_detected": ("#713f12", "#fde68a"),
     "price_near_absorption": ("#1e3a5f", "#93c5fd"),
@@ -88,7 +90,12 @@ def diagnose_neutral(latest: dict[str, Any] | None, state: dict[str, Any]) -> di
     }
     visual_thr = {k: _VISUAL_THR for k in engine_thr}
 
-    live = state.get("mtf_live") or {}
+    live_raw = state.get("mtf_live") or {}
+    live = enrich_mtf_ohlc(
+        live_raw,
+        bars_10m=list(state.get("bars_10m") or []),
+        last_price=float(state["last_price"]) if state.get("last_price") is not None else None,
+    )
     closed = (latest or {}).get("timeframes") or {}
     # Display sides always match the cards the trader is looking at.
     display_src = live if live else closed
@@ -104,12 +111,39 @@ def diagnose_neutral(latest: dict[str, Any] | None, state: dict[str, Any]) -> di
     if not latest and not live:
         return empty
 
-    # If live MF already clears engine thresholds on all TFs, composite is only
-    # waiting for bar close — not "mixed".
+    def _price_sides(src: dict[str, Any]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for key in ("10m", "30m", "1H"):
+            row = src.get(key) or {}
+            out[key] = _price_candle_side(
+                float(row.get("open") or 0.0),
+                float(row.get("close") or 0.0),
+            )
+        return out
+
+    def _mf_vs_price_conflict(mf_sides: dict[str, str], px_sides: dict[str, str]) -> bool:
+        """True when at least one TF has MF lean opposite to red/green candle."""
+        for key in ("10m", "30m", "1H"):
+            m, p = mf_sides.get(key, "flat"), px_sides.get(key, "flat")
+            if m != "flat" and p != "flat" and m != p:
+                return True
+        return False
+
+    # If live MF already clears engine thresholds on all TFs — but only treat as
+    # early-entry bias when price candles are not fighting that lean.
     if live:
         live_engine = _sides_from_norms(_mf_norms(live), engine_thr)
         lh, lm, lt = live_engine["1H"], live_engine["30m"], live_engine["10m"]
         if lh == lm == lt and lh != "flat":
+            px = _price_sides(live)
+            if _mf_vs_price_conflict(live_engine, px):
+                return {
+                    "reason": "mf_vs_price",
+                    "sides": sides,
+                    "price_sides": px,
+                    "awaiting": "price_confirm",
+                    "partial": lh,
+                }
             return {
                 "reason": "live_aligned_wait_close",
                 "sides": sides,
@@ -133,6 +167,15 @@ def diagnose_neutral(latest: dict[str, Any] | None, state: dict[str, Any]) -> di
     if h == m == tf10 == "flat":
         # Visual lean can still show buy/sell on cards while engine is flat.
         if sides["1H"] == sides["30m"] == sides["10m"] and sides["1H"] != "flat":
+            px = _price_sides(live) if live else {"10m": "flat", "30m": "flat", "1H": "flat"}
+            if _mf_vs_price_conflict(sides, px):
+                return {
+                    "reason": "mf_vs_price",
+                    "sides": sides,
+                    "price_sides": px,
+                    "awaiting": "price_confirm",
+                    "partial": sides["1H"],
+                }
             return {
                 "reason": "live_aligned_wait_close",
                 "sides": sides,
@@ -141,6 +184,15 @@ def diagnose_neutral(latest: dict[str, Any] | None, state: dict[str, Any]) -> di
             }
         return {"reason": "true_flat", "sides": sides, "awaiting": None, "partial": None}
     if h == m == tf10 and h != "flat":
+        px = _price_sides(live) if live else {"10m": "flat", "30m": "flat", "1H": "flat"}
+        if live and _mf_vs_price_conflict({"10m": tf10, "30m": m, "1H": h}, px):
+            return {
+                "reason": "mf_vs_price",
+                "sides": sides,
+                "price_sides": px,
+                "awaiting": "price_confirm",
+                "partial": h,
+            }
         return {
             "reason": "live_aligned_wait_close",
             "sides": sides,
@@ -208,8 +260,14 @@ def market_context(
 
 def active_triggers(ctx: dict[str, Any]) -> list[str]:
     found = ["always"]
+    diag_reason = (ctx.get("diagnosis") or {}).get("reason")
     if ctx["neutral"]:
-        found.append("neutral_signal")
+        # Live MF already clears all TF engine thresholds → early bias (rule #7),
+        # not the hard "don't trade" of rule #6.
+        if diag_reason == "live_aligned_wait_close":
+            found.append("live_aligned_bias")
+        else:
+            found.append("neutral_signal")
     if ctx["off_session"]:
         found.append("off_session")
     if ctx["divergence"]:
@@ -266,6 +324,32 @@ def _neutral_alert_text(ctx: dict[str, Any]) -> tuple[str, str]:
             t("alert.wait_live_title"),
             t("alert.wait_live_msg", direction=direction, sides=side_txt),
         )
+    if reason == "mf_vs_price":
+        partial = diag.get("partial") or "buy"
+        direction = t("side.buy") if partial == "buy" else t("side.sell")
+        px = diag.get("price_sides") or {}
+
+        def _px(side: str) -> str:
+            if side == "buy":
+                return t("mtf.price_up")
+            if side == "sell":
+                return t("mtf.price_down")
+            return "—"
+
+        px_txt = (
+            f"10m={_px(px.get('10m', 'flat'))} · "
+            f"30m={_px(px.get('30m', 'flat'))} · "
+            f"1H={_px(px.get('1H', 'flat'))}"
+        )
+        return (
+            t("alert.mf_vs_price_title"),
+            t(
+                "alert.mf_vs_price_msg",
+                direction=direction,
+                sides=side_txt,
+                price=px_txt,
+            ),
+        )
     if reason == "awaiting_1h":
         partial = diag.get("partial") or "buy"
         direction = t("side.buy") if partial == "buy" else t("side.sell")
@@ -288,21 +372,21 @@ def _neutral_alert_text(ctx: dict[str, Any]) -> tuple[str, str]:
 def render_contextual_alerts(ctx: dict[str, Any]) -> None:
     if ctx["neutral"]:
         title, msg = _neutral_alert_text(ctx)
-        # Partial lean / live aligned → amber (wait); true flat / mixed → red
         reason = (ctx.get("diagnosis") or {}).get("reason")
-        if reason in (
-            "awaiting_1h",
-            "awaiting_lower_tf",
-            "awaiting_first_close",
-            "live_aligned_wait_close",
-        ):
+        # Live MF aligned → actionable early bias (green). Partial → amber. Flat/mixed → red.
+        if reason == "live_aligned_wait_close":
+            st.success(f"⚡ **{title}** — {msg}")
+        elif reason == "mf_vs_price":
+            st.warning(f"⚠️ **{title}** — {msg}")
+        elif reason in ("awaiting_1h", "awaiting_lower_tf", "awaiting_first_close"):
             st.warning(f"⏳ **{title}** — {msg}")
         else:
             st.error(f"⛔ **{title}** — {msg}")
-        # Footprint ≠ sinal composto: short note when they seem to disagree
         abs_vol = float(ctx.get("absorption_volume") or 0.0)
-        if abs_vol != 0 and reason in ("awaiting_1h", "live_aligned_wait_close"):
+        if abs_vol != 0 and reason == "awaiting_1h":
             st.caption(t("alert.fp_vs_signal"))
+        elif abs_vol != 0 and reason == "live_aligned_wait_close":
+            st.caption(t("alert.fp_early_entry"))
     if ctx["off_session"]:
         st.warning(f"🕐 **{t('alert.session_title')}** — {t('alert.session_msg')}")
     if ctx["divergence"]:

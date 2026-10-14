@@ -82,7 +82,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "status.idle_line": "⚪ **OCIOSO** — engine não conectado",
         "signal.1": "VIÉS DE COMPRA",
         "signal.-1": "VIÉS DE VENDA",
-        "signal.0": "NEUTRO — PAUSAR SINAL",
+        "signal.0": "COMPOSTO NEUTRO",
+        "signal.live_buy": "VIÉS AO VIVO COMPRA · antecipado",
+        "signal.live_sell": "VIÉS AO VIVO VENDA · antecipado",
+        "signal.mf_vs_price": "MF ≠ PREÇO · aguardar",
         "awaiting_signal": "AGUARDANDO SINAL",
         "tile.price": "Preço GC",
         "tile.session": "Sessão (ET)",
@@ -113,13 +116,31 @@ STRINGS: dict[str, dict[str, str]] = {
         "mtf.title": "Análise Multi-Timeframe",
         "mtf.caption": "Cartões = última barra **fechada** de cada TF (não a vela ao vivo do Ninja).",
         "mtf.caption_live": (
-            "Cartões = barra **em formação** (atualiza a cada heartbeat). "
-            "A seta grande é o **Main Force** (lotes grandes), não o preço nem o varejo. "
+            "Cada cartão mostra **duas coisas**: seta = **Main Force** (lotes grandes); "
+            "linha Preço = cor da vela (fechamento vs abertura), como no gráfico. "
             "O **sinal composto** só muda no fechamento alinhado (1H+30m+10m)."
+        ),
+        "mtf.docs_title": "Como ler os cartões (MF ≠ cor da vela)",
+        "mtf.docs_body": (
+            "Cada cartão tem **dois lados**:\n"
+            "1. **MF (seta grande)** — fluxo institucional (lotes grandes, Lee-Ready).\n"
+            "2. **Preço** — mesma lógica da vela no gráfico (fechamento vs abertura).\n\n"
+            "MF norm = (vol. MF compra − vol. MF venda) / total MF.\n\n"
+            "Se MF está **compra** e Preço está **vermelha**, não é bug: lotes grandes "
+            "comprando enquanto o preço da barra ainda cai (ou o contrário).\n\n"
+            "O **sinal composto** só libera com 1H + 30m + 10m alinhados no **fechamento** "
+            "— cartões AO VIVO ainda não são liberação de entrada.\n\n"
+            "Horários do engine em UTC; compare o início da barra com o eixo do gráfico."
         ),
         "mtf.closed_badge": "barra fechada",
         "mtf.live_badge": "AO VIVO",
-        "mtf.mf_label": "lado = Main Force",
+        "mtf.mf_label": "seta = Main Force",
+        "mtf.mf_short": "MF",
+        "mtf.price_label": "Preço",
+        "mtf.price_up": "verde ↑",
+        "mtf.price_down": "vermelha ↓",
+        "mtf.price_flat": "doji →",
+        "mtf.note_mf_vs_price": "MF ≠ cor da vela de preço nesta barra",
         "mtf.note_retail_buy": "Varejo comprando — MF ainda sem lote grande",
         "mtf.note_retail_sell": "Varejo vendendo — MF ainda sem lote grande",
         "mtf.hint_retail_only_buy": (
@@ -128,6 +149,10 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "mtf.hint_retail_only_sell": (
             "Preço/varejo/footprint podem parecer vendidos, mas o **Main Force está neutro (MF≈0)**."
+        ),
+        "mtf.hint_mf_vs_price": (
+            "Em um ou mais TFs o **Main Force** aponta um lado e a **vela de preço** o outro. "
+            "Use MF para o viés institucional; use Preço só para bater o olho com o gráfico."
         ),
         "mtf.closed_at": "Sinal MTF em {ts} (Brasília)",
         "mtf.signal_closed_at": "Último sinal composto: {ts} (Brasília)",
@@ -286,7 +311,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "status.idle_line": "⚪ **IDLE** — engine not connected",
         "signal.1": "LONG BIAS",
         "signal.-1": "SHORT BIAS",
-        "signal.0": "NEUTRAL — PAUSE SIGNAL",
+        "signal.0": "COMPOSITE FLAT",
+        "signal.live_buy": "LIVE LONG BIAS · early",
+        "signal.live_sell": "LIVE SHORT BIAS · early",
+        "signal.mf_vs_price": "MF ≠ PRICE · wait",
         "awaiting_signal": "WAITING FOR SIGNAL",
         "tile.price": "GC price",
         "tile.session": "Session (ET)",
@@ -317,13 +345,31 @@ STRINGS: dict[str, dict[str, str]] = {
         "mtf.title": "Multi-Timeframe Analysis",
         "mtf.caption": "Cards = last **closed** bar on each TF (not the live Ninja candle).",
         "mtf.caption_live": (
-            "Cards = **forming** bar (updates every heartbeat). "
-            "The big arrow is **Main Force** (large lots), not price or retail. "
+            "Each card shows **two things**: arrow = **Main Force** (large lots); "
+            "Price line = candle color (close vs open), like on the chart. "
             "The **composite signal** only changes on aligned closes (1H+30m+10m)."
+        ),
+        "mtf.docs_title": "How to read the cards (MF ≠ candle color)",
+        "mtf.docs_body": (
+            "Each card has **two sides**:\n"
+            "1. **MF (big arrow)** — institutional flow (large lots, Lee-Ready).\n"
+            "2. **Price** — same logic as the chart candle (close vs open).\n\n"
+            "MF norm = (MF buy vol − MF sell vol) / total MF.\n\n"
+            "If MF says **buy** and Price is **red**, that is not a bug: large lots "
+            "buying while the bar’s price is still down (or the opposite).\n\n"
+            "The **composite signal** only unlocks when 1H + 30m + 10m align on "
+            "**bar close** — LIVE cards are not an entry green light.\n\n"
+            "Engine times are UTC; match bar start to the chart axis."
         ),
         "mtf.closed_badge": "closed bar",
         "mtf.live_badge": "LIVE",
-        "mtf.mf_label": "side = Main Force",
+        "mtf.mf_label": "arrow = Main Force",
+        "mtf.mf_short": "MF",
+        "mtf.price_label": "Price",
+        "mtf.price_up": "green ↑",
+        "mtf.price_down": "red ↓",
+        "mtf.price_flat": "doji →",
+        "mtf.note_mf_vs_price": "MF ≠ price candle color on this bar",
         "mtf.note_retail_buy": "Retail buying — no large MF lot yet",
         "mtf.note_retail_sell": "Retail selling — no large MF lot yet",
         "mtf.hint_retail_only_buy": (
@@ -332,6 +378,10 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "mtf.hint_retail_only_sell": (
             "Price/retail/footprint may look sold, but **Main Force is flat (MF≈0)**."
+        ),
+        "mtf.hint_mf_vs_price": (
+            "On one or more TFs **Main Force** points one way and the **price candle** the other. "
+            "Use MF for institutional bias; use Price only to match the chart by eye."
         ),
         "mtf.closed_at": "MTF signal at {ts} (Brasília)",
         "mtf.signal_closed_at": "Last composite signal: {ts} (Brasília)",
@@ -442,10 +492,17 @@ _PLAYBOOK_COPY: dict[str, dict[str, str]] = {
         "pb.4.rule": "Saia quando o fluxo institucional do 10m virar negativo. Não use alvo fixo.",
         "pb.5.title": "Sessão importa",
         "pb.5.rule": "Evite operar na sessão asiática. Foque em Londres (04:00 BRT) e Nova York (09:30 BRT).",
-        "pb.6.title": "Sem sinal composto, sem operação",
+        "pb.6.title": "Sem alinhamento, sem forçar",
         "pb.6.rule": (
-            "Sinal composto = 1H + 30m + 10m alinhados no **fechamento**. "
-            "Cartões AO VIVO verdes ainda são NEUTRO até as barras fecharem."
+            "Se 10m / 30m / 1H **não** estão alinhados no Main Force, não force entrada. "
+            "Mistura ou TF zerado = ficar de fora."
+        ),
+        "pb.7.title": "Viés antecipado no fluxo ao vivo",
+        "pb.7.rule": (
+            "Quando 10m + 30m + 1H já passam o limiar MF **na barra aberta**, o viés "
+            "institucional está liberado — **não espere o fechamento** da barra "
+            "(o preço já andou). Entre com tamanho menor ou na absorção 10m; "
+            "o composto no fechamento só formaliza o que o AO VIVO já mostrou."
         ),
         "side.buy": "compra",
         "side.sell": "venda",
@@ -456,11 +513,19 @@ _PLAYBOOK_COPY: dict[str, dict[str, str]] = {
             "Regra #6: não force entrada. Os 3 timeframes não estão alinhados "
             "({sides})."
         ),
-        "alert.wait_live_title": "FLUXO AO VIVO ALINHADO",
+        "alert.wait_live_title": "VIÉS ANTECIPADO — ENTRADA LIBERADA",
         "alert.wait_live_msg": (
-            "Regra #6: 10m · 30m · 1H já puxam para {direction} na barra aberta "
-            "({sides}). O sinal composto só confirma no **fechamento** das barras — "
-            "não force a entrada ainda."
+            "Regra #7: 10m · 30m · 1H já puxam para **{direction}** no Main Force "
+            "ao vivo ({sides}). Não espere o fechamento da barra — o preço já "
+            "andou. Entre agora com **tamanho menor** ou na zona de absorção 10m; "
+            "o sinal composto no fechamento só confirma o viés formal."
+        ),
+        "alert.mf_vs_price_title": "MF ≠ PREÇO — NÃO ENTRE AINDA",
+        "alert.mf_vs_price_msg": (
+            "Main Force puxa para **{direction}** ({sides}), mas a **vela de preço** "
+            "está no outro lado ({price}). Mercado vendido com MF compra (ou o "
+            "contrário) = absorção / divergência — espere o preço confirmar o MF "
+            "antes de entrar."
         ),
         "alert.wait_1h_title": "AGUARDANDO 1H",
         "alert.wait_1h_msg": (
@@ -478,6 +543,10 @@ _PLAYBOOK_COPY: dict[str, dict[str, str]] = {
         "alert.fp_vs_signal": (
             "Footprint 10m mostra absorção local (preço). "
             "Isso **não** substitui o sinal composto MTF — use como zona, não como liberação."
+        ),
+        "alert.fp_early_entry": (
+            "Com viés AO VIVO alinhado, use a absorção 10m como **gatilho de preço** "
+            "para entrar sem esperar o fechamento da barra."
         ),
         "alert.abs_title": "PREÇO PRÓXIMO DA ABSORÇÃO",
         "alert.abs_msg": "Regra #3: {ticks} ticks de ${level}.",
@@ -540,10 +609,17 @@ _PLAYBOOK_COPY: dict[str, dict[str, str]] = {
         "pb.4.rule": "Exit when the 10m institutional flow turns negative. Do not use a fixed target.",
         "pb.5.title": "Session matters",
         "pb.5.rule": "Avoid the Asian session. Focus on London (04:00 BRT) and New York (09:30 BRT).",
-        "pb.6.title": "No composite signal, no trade",
+        "pb.6.title": "No alignment, do not force",
         "pb.6.rule": (
-            "Composite = 1H + 30m + 10m aligned on **bar close**. "
-            "Green LIVE cards are still NEUTRAL until those bars close."
+            "If 10m / 30m / 1H are **not** aligned on Main Force, do not force an entry. "
+            "Mixed or flat TFs = stay out."
+        ),
+        "pb.7.title": "Early bias on live flow",
+        "pb.7.rule": (
+            "When 10m + 30m + 1H already clear MF thresholds on the **open bar**, "
+            "institutional bias is on — **do not wait for bar close** (price already "
+            "moved). Enter smaller size or at the 10m absorption zone; the composite "
+            "on close only formalizes what LIVE already showed."
         ),
         "side.buy": "buy",
         "side.sell": "sell",
@@ -554,11 +630,18 @@ _PLAYBOOK_COPY: dict[str, dict[str, str]] = {
             "Rule #6: do not force an entry. The 3 timeframes are not aligned "
             "({sides})."
         ),
-        "alert.wait_live_title": "LIVE FLOW ALIGNED",
+        "alert.wait_live_title": "EARLY BIAS — ENTRY ALLOWED",
         "alert.wait_live_msg": (
-            "Rule #6: 10m · 30m · 1H already lean {direction} on the open bar "
-            "({sides}). The composite only confirms on **bar close** — "
-            "do not force an entry yet."
+            "Rule #7: 10m · 30m · 1H already lean **{direction}** on live Main Force "
+            "({sides}). Do not wait for bar close — price already moved. Enter now "
+            "with **smaller size** or at the 10m absorption zone; the composite on "
+            "close only confirms the formal bias."
+        ),
+        "alert.mf_vs_price_title": "MF ≠ PRICE — DO NOT ENTER YET",
+        "alert.mf_vs_price_msg": (
+            "Main Force leans **{direction}** ({sides}), but the **price candle** "
+            "is the other way ({price}). Sold market with MF buy (or the reverse) "
+            "is absorption / divergence — wait for price to confirm MF before entry."
         ),
         "alert.wait_1h_title": "WAITING ON 1H",
         "alert.wait_1h_msg": (
@@ -576,6 +659,10 @@ _PLAYBOOK_COPY: dict[str, dict[str, str]] = {
         "alert.fp_vs_signal": (
             "The 10m footprint shows local absorption (price). "
             "It does **not** replace the MTF composite — use it as a zone, not a green light."
+        ),
+        "alert.fp_early_entry": (
+            "With LIVE bias aligned, use the 10m absorption as a **price trigger** "
+            "to enter without waiting for bar close."
         ),
         "alert.abs_title": "PRICE NEAR ABSORPTION",
         "alert.abs_msg": "Rule #3: {ticks} ticks from ${level}.",

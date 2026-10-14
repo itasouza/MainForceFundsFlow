@@ -365,10 +365,16 @@ class IncrementalMTFEngine:
             if bar.get("is_open") and bar.get("bar_start_time") is not None:
                 prev = _finalize_metrics(bar)
                 ts = pd.Timestamp(bar["bar_start_time"]).isoformat()
+                # OHLC from the live bar itself (not only finalized copy) so the
+                # dashboard can show price candle color vs MF side.
                 out[tf] = {
                     "mf_delta_norm": round(float(prev["mf_delta_norm"]), 4),
                     "retail_delta_norm": round(float(prev["retail_delta_norm"]), 4),
                     "mf_delta": round(float(prev["mf_delta"]), 2),
+                    "open": round(float(bar.get("open") or prev.get("open") or 0.0), 4),
+                    "high": round(float(bar.get("high") or prev.get("high") or 0.0), 4),
+                    "low": round(float(bar.get("low") or prev.get("low") or 0.0), 4),
+                    "close": round(float(bar.get("close") or prev.get("close") or 0.0), 4),
                     "live": True,
                     "bar_start": ts,
                 }
@@ -379,6 +385,10 @@ class IncrementalMTFEngine:
                     "mf_delta_norm": round(float(last["mf_delta_norm"]), 4),
                     "retail_delta_norm": round(float(last["retail_delta_norm"]), 4),
                     "mf_delta": round(float(last["mf_delta"]), 2),
+                    "open": round(float(last.get("open") or 0.0), 4),
+                    "high": round(float(last.get("high") or 0.0), 4),
+                    "low": round(float(last.get("low") or 0.0), 4),
+                    "close": round(float(last.get("close") or 0.0), 4),
                     "live": False,
                     "bar_start": pd.Timestamp(ts).isoformat() if ts is not None else None,
                 }
@@ -387,6 +397,8 @@ class IncrementalMTFEngine:
                     "mf_delta_norm": 0.0,
                     "retail_delta_norm": 0.0,
                     "mf_delta": 0.0,
+                    "open": 0.0,
+                    "close": 0.0,
                     "live": False,
                     "bar_start": None,
                 }

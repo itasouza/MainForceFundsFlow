@@ -312,7 +312,18 @@ def _render_dashboard() -> None:
             f"<span style='font-size:.75rem;opacity:.7'>{t('status.engine_ok', age=format_age(state_age))}</span>"
         )
 
-    if latest:
+    # Header badge: composite is closed-bar only. When live MF is already
+    # aligned (rule #7), show early bias instead of "NEUTRO — PAUSAR".
+    diag = mentor.get("diagnosis") or {}
+    if diag.get("reason") == "live_aligned_wait_close":
+        partial = diag.get("partial") or "buy"
+        if partial == "sell":
+            sig_txt, sig_color = t("signal.live_sell"), "#dc2626"
+        else:
+            sig_txt, sig_color = t("signal.live_buy"), "#16a34a"
+    elif diag.get("reason") == "mf_vs_price":
+        sig_txt, sig_color = t("signal.mf_vs_price"), "#f59e0b"
+    elif latest:
         sig_label, sig_color = signal_badge(int(latest.get("composite_signal", 0)))
         sig_txt = f"{sig_label} · {float(latest.get('confidence_score', 0)) * 100:.0f}%"
     else:
@@ -416,23 +427,40 @@ def _render_dashboard() -> None:
 
     with tab_op:
         st.subheader(t("mtf.title"))
-        render_tf_columns(latest, live_mtf=state.get("mtf_live"))
+        render_tf_columns(
+            latest,
+            live_mtf=state.get("mtf_live"),
+            bars_10m=list(state.get("bars_10m") or []),
+            last_price=float(state["last_price"]) if state.get("last_price") is not None else None,
+        )
         if show_footprint:
             render_mtf_vs_footprint_note(latest, fp_bundle, live_mtf=state.get("mtf_live"))
             st.markdown("<div style='height:2rem'></div>", unsafe_allow_html=True)
             footprint_tf = st.pills(
                 t("fp.timeframe"),
-                ["10m", "30m", "1H"],
+                ["10m", "30m", "1H", "10m + 30m + 1H"],
                 default="10m",
                 selection_mode="single",
                 key="fp_tf",
             ) or "10m"
-            render_mf_footprint_section(
-                fp_bundle,
-                selected_tf=footprint_tf,
-                footprint_meta=state.get("footprint_meta"),
-                ninja_price=state.get("last_price"),
-            )
+            if footprint_tf == "10m + 30m + 1H":
+                # 3 footprints lado a lado (mesma ordem dos cartões MTF)
+                for col, tf in zip(st.columns(3, gap="small"), ("10m", "30m", "1H")):
+                    with col:
+                        render_mf_footprint_section(
+                            fp_bundle,
+                            selected_tf=tf,
+                            footprint_meta=state.get("footprint_meta"),
+                            ninja_price=state.get("last_price"),
+                            compact=True,
+                        )
+            else:
+                render_mf_footprint_section(
+                    fp_bundle,
+                    selected_tf=footprint_tf,
+                    footprint_meta=state.get("footprint_meta"),
+                    ninja_price=state.get("last_price"),
+                )
 
     with tab_chart:
         st.subheader(t("chart.title"))
