@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -218,105 +219,13 @@ if ui_mode == "backtest":
     if uploaded and st.sidebar.button(t("process_csv")):
         st.session_state["bt_state"] = run_local_backtest(uploaded.getvalue(), overrides)
 
-# ---------- Load state ----------
-if ui_mode == "backtest" and "bt_state" in st.session_state:
-    state = st.session_state["bt_state"]
-else:
-    state = load_engine_state()
-
-log = filter_log_by_session(list(state.get("signal_log") or []), session_filter)
-latest = state.get("latest_signal")
-if session_filter != "all" and log:
-    latest = log[-1]
-memory = load_memory(_ROOT)
-mentor = market_context(state, latest, memory["trades"])
-active_rule = primary_rule(mentor)
-
-# ---------- Header (barra compacta) ----------
-head_left, head_right = st.columns([2, 3], vertical_alignment="center")
-with head_right:
-    if st.session_state.get("theme_name") not in THEMES:
-        st.session_state["theme_name"] = "default"
-    lang_col, theme_col = st.columns([1, 2], vertical_alignment="center")
-    with lang_col:
-        st.pills(
-            t("language"),
-            ["pt", "en"],
-            format_func=lambda code: t(f"lang.{code}"),
-            selection_mode="single",
-            key="lang",
-            label_visibility="collapsed",
-        )
-    with theme_col:
-        theme_name = st.pills(
-            t("theme"),
-            list(THEMES),
-            format_func=lambda code: t(f"theme.{code}"),
-            selection_mode="single",
-            key="theme_name",
-            label_visibility="collapsed",
-        ) or "default"
-theme_bg, theme_side, theme_accent = THEMES[theme_name]
-st.markdown(
-    "<style>.block-container{padding-top:2.5rem;padding-bottom:1rem}"
-    "div[data-testid='stVerticalBlock']{gap:0.6rem}"
-    "[data-testid='stHeader']{height:2.5rem;min-height:2.5rem;background:transparent}"
-    f".stApp,[data-testid='stAppViewContainer']{{background:{theme_bg}}}"
-    f"[data-testid='stSidebar'],[data-testid='stSidebar']>div{{background:{theme_side}}}"
-    f"[data-baseweb='tab-highlight']{{background:{theme_accent}!important}}"
-    f"button[role='tab'][aria-selected='true']{{color:{theme_accent}!important}}"
-    "[data-testid='stButtonGroup']{flex-wrap:wrap;justify-content:flex-end}"
-    "[data-testid='stStatusWidget'],"
-    "[data-testid='stAppDeployButton'],[data-testid='stMainMenu']{display:none!important}</style>",
-    unsafe_allow_html=True,
+# ---------- Dashboard body ----------
+# sleep()+st.rerun() used to block the session and intermittently stack a full
+# duplicate page in the browser. Refresh only this fragment instead.
+form_open = bool(
+    st.session_state.get("journal_form_open") or st.session_state.get("journal_close_open")
 )
-
-regime = state.get("regime") or {}
-thr = state.get("thresholds") or {}
-mode = state.get("mode", "idle")
-state_age = state_age_seconds(STATE_PATH) if ui_mode == "live" else None
-engine_down = ui_mode == "live" and (state_age is None or state_age > ENGINE_STALE_SEC)
-if engine_down:
-    status = t("status.engine_down")
-elif mode == "live" and state.get("live"):
-    status = t("status.live")
-elif mode == "live":
-    status = t("status.live_stale")
-elif mode == "backtest":
-    status = t("status.backtest")
-else:
-    status = t("status.idle")
-age_html = ""
-if ui_mode == "live" and state_age is not None and not engine_down:
-    age_html = (
-        f"<span style='font-size:.75rem;opacity:.7'>{t('status.engine_ok', age=format_age(state_age))}</span>"
-    )
-
-if latest:
-    sig_label, sig_color = signal_badge(int(latest.get("composite_signal", 0)))
-    sig_txt = f"{sig_label} · {float(latest.get('confidence_score', 0)) * 100:.0f}%"
-else:
-    sig_txt, sig_color = t("awaiting_signal"), "#6b7280"
-
-price = state.get("last_price")
-open_px = state.get("session_open_price")
-if price is None:
-    px_html = "—"
-else:
-    px_html = f"<b style='font-size:1.15rem'>{price:.2f}</b>"
-    if open_px:
-        chg = (price - open_px) / open_px * 100
-        px_html += f" <span style='color:{'#16a34a' if chg >= 0 else '#dc2626'}'>{chg:+.2f}%</span>"
-
-
-regime_txt = (
-    f"{regime.get('regime', '—')} · {regime_label(regime.get('label'), regime.get('regime'))}"
-)
-thr_txt = (
-    f"<span style='font-size:.8rem'>1H {thr.get('threshold_1h', '—')}<br>"
-    f"30m {thr.get('threshold_30m', '—')}<br>10m {thr.get('threshold_10m', '—')}</span>"
-)
-grid_paused = bool(thr.get("grid_paused"))
+_auto_refresh = ui_mode == "live" and not pause and not form_open
 
 
 def _tile(label: str, value: str, sub: str = "") -> str:
@@ -329,135 +238,236 @@ def _tile(label: str, value: str, sub: str = "") -> str:
     )
 
 
-grid_html = (
-    f"<span style='color:#dc2626'>{t('yes')}</span>"
-    if grid_paused
-    else f"<span style='color:#16a34a'>{t('no')}</span>"
-)
-session_name = session_label(state.get("active_session")) if state.get("active_session") else "—"
-tiles = "".join(
-    [
-        _tile(t("tile.price"), px_html),
-        _tile(t("tile.session"), session_name, t("ticks_n", n=state.get("tick_count", 0))),
-        _tile(t("tile.regime"), regime_txt, t("source_line", source=source_label(regime.get("source", "—")))),
-        _tile(t("tile.paused"), grid_html, t("mf_floor", n=thr.get("mf_fixed_threshold_contracts", "—"))),
-    ]
-)
-ts = f" · {fmt_br(latest.get('timestamp'))} ({t('brasilia')})" if latest else ""
+def _render_dashboard() -> None:
+    if ui_mode == "backtest" and "bt_state" in st.session_state:
+        state = st.session_state["bt_state"]
+    else:
+        state = load_engine_state()
 
-with head_left:
-  st.markdown(
-    "<div style='display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem'>"
-    "<span style='font-size:1.3rem;font-weight:700'>🥇 GC Main Force Flow</span>"
-    f"<span style='font-weight:600'>{status}</span>"
-    f"<span style='background:{sig_color};color:#fff;font-weight:700;padding:.3rem .9rem;border-radius:8px'>{sig_txt}</span>"
-    f"{badge_html(active_rule)}"
-    f"{age_html}"
-    f"<span style='font-size:.75rem;opacity:.55'>{ts.lstrip(' · ')}</span>"
-    "</div>",
-    unsafe_allow_html=True,
-  )
-if ui_mode == "live":
-    ticks_now = int(state.get("tick_count") or 0)
-    if st.session_state.get("_ticks_mark") != ticks_now:
-        st.session_state["_ticks_mark"] = ticks_now
-        st.session_state["_ticks_mark_at"] = time.time()
-    ticks_quiet = time.time() - float(st.session_state.get("_ticks_mark_at") or time.time())
-else:
-    ticks_quiet = 0.0
-tape_stopped = ui_mode == "live" and not engine_down and ticks_quiet > ENGINE_STALE_SEC
-if engine_down:
-    age_txt = format_age(state_age) if state_age is not None else t("age.unknown")
-    st.error(t("alert.engine_down", age=age_txt))
-elif tape_stopped:
-    st.warning(t("alert.tape_stopped", age=format_age(ticks_quiet)))
-tiles_col, limits_col, trade_col = st.columns([4.2, 1.05, 1.55], vertical_alignment="center")
-with tiles_col:
+    log = filter_log_by_session(list(state.get("signal_log") or []), session_filter)
+    latest = state.get("latest_signal")
+    if session_filter != "all" and log:
+        latest = log[-1]
+    memory = load_memory(_ROOT)
+    mentor = market_context(state, latest, memory["trades"])
+    active_rule = primary_rule(mentor)
+
+    # ---------- Header (barra compacta) ----------
+    head_left, head_right = st.columns([2, 3], vertical_alignment="center")
+    with head_right:
+        if st.session_state.get("theme_name") not in THEMES:
+            st.session_state["theme_name"] = "default"
+        lang_col, theme_col = st.columns([1, 2], vertical_alignment="center")
+        with lang_col:
+            st.pills(
+                t("language"),
+                ["pt", "en"],
+                format_func=lambda code: t(f"lang.{code}"),
+                selection_mode="single",
+                key="lang",
+                label_visibility="collapsed",
+            )
+        with theme_col:
+            theme_name = st.pills(
+                t("theme"),
+                list(THEMES),
+                format_func=lambda code: t(f"theme.{code}"),
+                selection_mode="single",
+                key="theme_name",
+                label_visibility="collapsed",
+            ) or "default"
+    theme_bg, theme_side, theme_accent = THEMES[theme_name]
     st.markdown(
-        "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:.5rem'>"
-        f"{tiles}</div>",
+        "<style>.block-container{padding-top:2.5rem;padding-bottom:1rem}"
+        "div[data-testid='stVerticalBlock']{gap:0.6rem}"
+        "[data-testid='stHeader']{height:2.5rem;min-height:2.5rem;background:transparent}"
+        f".stApp,[data-testid='stAppViewContainer']{{background:{theme_bg}}}"
+        f"[data-testid='stSidebar'],[data-testid='stSidebar']>div{{background:{theme_side}}}"
+        f"[data-baseweb='tab-highlight']{{background:{theme_accent}!important}}"
+        f"button[role='tab'][aria-selected='true']{{color:{theme_accent}!important}}"
+        "[data-testid='stButtonGroup']{flex-wrap:wrap;justify-content:flex-end}"
+        "[data-testid='stStatusWidget'],"
+        "[data-testid='stAppDeployButton'],[data-testid='stMainMenu']{display:none!important}</style>",
         unsafe_allow_html=True,
     )
-with limits_col:
-    st.markdown(_tile(t("tile.thresholds"), thr_txt), unsafe_allow_html=True)
-with trade_col:
-    open_trade_button(memory["trades"])
-render_trade_form(_ROOT, state)
-render_close_form(_ROOT, state)
-if state.get("live") and not state.get("latest_signal"):
-    st.info(t("info.waiting_close"))
-if not state.get("live") and (state.get("tick_count") or 0) == 0:
-    st.warning(t("warn.no_ticks"))
-render_contextual_alerts(mentor)
-render_divergence(latest)
 
-# ---------- Abas ----------
-tab_op, tab_chart, tab_log, tab_mentor = st.tabs(
-    [t("tab.op"), t("tab.chart"), t("tab.log"), t("tab.mentor")]
-)
-
-fp_bundle = None
-if show_footprint:
-    # Live heartbeat prefers open-bar map; fall back to latest signal payload
-    fp_bundle = state.get("institutional_footprint")
-    if not fp_bundle or not any(
-        (fp_bundle.get(tf) or {}).get("price_levels") for tf in ("10m", "30m", "1H")
-    ):
-        if latest and latest.get("institutional_footprint"):
-            fp_bundle = latest.get("institutional_footprint")
-
-with tab_op:
-    st.subheader(t("mtf.title"))
-    render_tf_columns(latest, live_mtf=state.get("mtf_live"))
-    if show_footprint:
-        render_mtf_vs_footprint_note(latest, fp_bundle, live_mtf=state.get("mtf_live"))
-        st.markdown("<div style='height:2rem'></div>", unsafe_allow_html=True)
-        footprint_tf = st.pills(
-            t("fp.timeframe"),
-            ["10m", "30m", "1H"],
-            default="10m",
-            selection_mode="single",
-            key="fp_tf",
-        ) or "10m"
-        render_mf_footprint_section(
-            fp_bundle,
-            selected_tf=footprint_tf,
-            footprint_meta=state.get("footprint_meta"),
-            ninja_price=state.get("last_price"),
-        )
-
-with tab_chart:
-    st.subheader(t("chart.title"))
-    fig = build_price_chart(list(state.get("bars_10m") or []), log)
-    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig, use_container_width=True)
-
-with tab_log:
-    table = signal_log_table(log)
-    if table.empty:
-        st.info(t("log.empty"))
+    regime = state.get("regime") or {}
+    thr = state.get("thresholds") or {}
+    mode = state.get("mode", "idle")
+    state_age = state_age_seconds(STATE_PATH) if ui_mode == "live" else None
+    engine_down = ui_mode == "live" and (state_age is None or state_age > ENGINE_STALE_SEC)
+    if engine_down:
+        status = t("status.engine_down")
+    elif mode == "live" and state.get("live"):
+        status = t("status.live")
+    elif mode == "live":
+        status = t("status.live_stale")
+    elif mode == "backtest":
+        status = t("status.backtest")
     else:
-        st.dataframe(table, use_container_width=True, height=480)
-        st.download_button(
-            t("log.export"),
-            data=table.to_csv(index=False).encode("utf-8"),
-            file_name="gc_mf_signal_log.csv",
-            mime="text/csv",
+        status = t("status.idle")
+    age_html = ""
+    if ui_mode == "live" and state_age is not None and not engine_down:
+        age_html = (
+            f"<span style='font-size:.75rem;opacity:.7'>{t('status.engine_ok', age=format_age(state_age))}</span>"
         )
 
-with tab_mentor:
-    sub_playbook, sub_journal, sub_stats = st.tabs(
-        [t("tab.playbook"), t("tab.journal"), t("tab.stats")]
-    )
-    with sub_playbook:
-        render_playbook(mentor)
-    with sub_journal:
-        st.caption(t("journal.near_limits"))
-    with sub_stats:
-        render_stats(_ROOT)
+    if latest:
+        sig_label, sig_color = signal_badge(int(latest.get("composite_signal", 0)))
+        sig_txt = f"{sig_label} · {float(latest.get('confidence_score', 0)) * 100:.0f}%"
+    else:
+        sig_txt, sig_color = t("awaiting_signal"), "#6b7280"
 
-# Auto-refresh in live view (3s — state disk writes are heartbeat/10m, not 0.5s)
-form_open = st.session_state.get("journal_form_open") or st.session_state.get("journal_close_open")
-if ui_mode == "live" and not pause and not form_open:
-    time.sleep(3.0)
-    st.rerun()
+    price = state.get("last_price")
+    open_px = state.get("session_open_price")
+    if price is None:
+        px_html = "—"
+    else:
+        px_html = f"<b style='font-size:1.15rem'>{price:.2f}</b>"
+        if open_px:
+            chg = (price - open_px) / open_px * 100
+            px_html += f" <span style='color:{'#16a34a' if chg >= 0 else '#dc2626'}'>{chg:+.2f}%</span>"
+
+    regime_txt = (
+        f"{regime.get('regime', '—')} · {regime_label(regime.get('label'), regime.get('regime'))}"
+    )
+    thr_txt = (
+        f"<span style='font-size:.8rem'>1H {thr.get('threshold_1h', '—')}<br>"
+        f"30m {thr.get('threshold_30m', '—')}<br>10m {thr.get('threshold_10m', '—')}</span>"
+    )
+    grid_paused = bool(thr.get("grid_paused"))
+
+    grid_html = (
+        f"<span style='color:#dc2626'>{t('yes')}</span>"
+        if grid_paused
+        else f"<span style='color:#16a34a'>{t('no')}</span>"
+    )
+    session_name = session_label(state.get("active_session")) if state.get("active_session") else "—"
+    tiles = "".join(
+        [
+            _tile(t("tile.price"), px_html),
+            _tile(t("tile.session"), session_name, t("ticks_n", n=state.get("tick_count", 0))),
+            _tile(t("tile.regime"), regime_txt, t("source_line", source=source_label(regime.get("source", "—")))),
+            _tile(t("tile.paused"), grid_html, t("mf_floor", n=thr.get("mf_fixed_threshold_contracts", "—"))),
+        ]
+    )
+    ts = f" · {fmt_br(latest.get('timestamp'))} ({t('brasilia')})" if latest else ""
+
+    with head_left:
+        st.markdown(
+            "<div style='display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem'>"
+            "<span style='font-size:1.3rem;font-weight:700'>🥇 GC Main Force Flow</span>"
+            f"<span style='font-weight:600'>{status}</span>"
+            f"<span style='background:{sig_color};color:#fff;font-weight:700;padding:.3rem .9rem;border-radius:8px'>{sig_txt}</span>"
+            f"{badge_html(active_rule)}"
+            f"{age_html}"
+            f"<span style='font-size:.75rem;opacity:.55'>{ts.lstrip(' · ')}</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    if ui_mode == "live":
+        ticks_now = int(state.get("tick_count") or 0)
+        if st.session_state.get("_ticks_mark") != ticks_now:
+            st.session_state["_ticks_mark"] = ticks_now
+            st.session_state["_ticks_mark_at"] = time.time()
+        ticks_quiet = time.time() - float(st.session_state.get("_ticks_mark_at") or time.time())
+    else:
+        ticks_quiet = 0.0
+    tape_stopped = ui_mode == "live" and not engine_down and ticks_quiet > ENGINE_STALE_SEC
+    if engine_down:
+        age_txt = format_age(state_age) if state_age is not None else t("age.unknown")
+        st.error(t("alert.engine_down", age=age_txt))
+    elif tape_stopped:
+        st.warning(t("alert.tape_stopped", age=format_age(ticks_quiet)))
+    tiles_col, limits_col, trade_col = st.columns([4.2, 1.05, 1.55], vertical_alignment="center")
+    with tiles_col:
+        st.markdown(
+            "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:.5rem'>"
+            f"{tiles}</div>",
+            unsafe_allow_html=True,
+        )
+    with limits_col:
+        st.markdown(_tile(t("tile.thresholds"), thr_txt), unsafe_allow_html=True)
+    with trade_col:
+        open_trade_button(memory["trades"])
+    render_trade_form(_ROOT, state)
+    render_close_form(_ROOT, state)
+    if state.get("live") and not state.get("latest_signal"):
+        st.info(t("info.waiting_close"))
+    if not state.get("live") and (state.get("tick_count") or 0) == 0:
+        st.warning(t("warn.no_ticks"))
+    render_contextual_alerts(mentor)
+    render_divergence(latest)
+
+    # ---------- Abas ----------
+    tab_op, tab_chart, tab_log, tab_mentor = st.tabs(
+        [t("tab.op"), t("tab.chart"), t("tab.log"), t("tab.mentor")]
+    )
+
+    fp_bundle = None
+    if show_footprint:
+        # Live heartbeat prefers open-bar map; fall back to latest signal payload
+        fp_bundle = state.get("institutional_footprint")
+        if not fp_bundle or not any(
+            (fp_bundle.get(tf) or {}).get("price_levels") for tf in ("10m", "30m", "1H")
+        ):
+            if latest and latest.get("institutional_footprint"):
+                fp_bundle = latest.get("institutional_footprint")
+
+    with tab_op:
+        st.subheader(t("mtf.title"))
+        render_tf_columns(latest, live_mtf=state.get("mtf_live"))
+        if show_footprint:
+            render_mtf_vs_footprint_note(latest, fp_bundle, live_mtf=state.get("mtf_live"))
+            st.markdown("<div style='height:2rem'></div>", unsafe_allow_html=True)
+            footprint_tf = st.pills(
+                t("fp.timeframe"),
+                ["10m", "30m", "1H"],
+                default="10m",
+                selection_mode="single",
+                key="fp_tf",
+            ) or "10m"
+            render_mf_footprint_section(
+                fp_bundle,
+                selected_tf=footprint_tf,
+                footprint_meta=state.get("footprint_meta"),
+                ninja_price=state.get("last_price"),
+            )
+
+    with tab_chart:
+        st.subheader(t("chart.title"))
+        fig = build_price_chart(list(state.get("bars_10m") or []), log)
+        fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab_log:
+        table = signal_log_table(log)
+        if table.empty:
+            st.info(t("log.empty"))
+        else:
+            st.dataframe(table, use_container_width=True, height=480)
+            st.download_button(
+                t("log.export"),
+                data=table.to_csv(index=False).encode("utf-8"),
+                file_name="gc_mf_signal_log.csv",
+                mime="text/csv",
+            )
+
+    with tab_mentor:
+        sub_playbook, sub_journal, sub_stats = st.tabs(
+            [t("tab.playbook"), t("tab.journal"), t("tab.stats")]
+        )
+        with sub_playbook:
+            render_playbook(mentor)
+        with sub_journal:
+            st.caption(t("journal.near_limits"))
+        with sub_stats:
+            render_stats(_ROOT)
+
+
+@st.fragment(run_every=timedelta(seconds=3) if _auto_refresh else None, key="mf_dashboard")
+def _dashboard_fragment() -> None:
+    _render_dashboard()
+
+
+_dashboard_fragment()
