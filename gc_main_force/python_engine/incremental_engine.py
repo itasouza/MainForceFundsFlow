@@ -341,6 +341,8 @@ class IncrementalMTFEngine:
             # Prefer live open-bar map for dashboard; last-closed kept for EA payload
             "institutional_footprint": self._institutional_footprint_bundle(prefer_live=True),
             "institutional_footprint_closed": self._institutional_footprint_bundle(prefer_live=False),
+            # Open-bar MTF for UI (heartbeat). Composite signal still uses closed bars only.
+            "mtf_live": self._mtf_live_bundle(),
             "footprint_meta": {
                 "mf_only": self.footprint_mf_only,
                 "fp_min": self.fp_min,
@@ -349,6 +351,46 @@ class IncrementalMTFEngine:
                 "tick_size": self.tick_size,
             },
         }
+
+    def _mtf_live_bundle(self) -> dict[str, dict[str, Any]]:
+        """
+        MF/retail norms for the bar currently forming on each TF.
+
+        Used only for dashboard freshness. Signal composite ignores this and waits
+        for closed bars (especially 1H).
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for tf in TF_KEYS:
+            bar = self.current_bars.get(tf) or {}
+            if bar.get("is_open") and bar.get("bar_start_time") is not None:
+                prev = _finalize_metrics(bar)
+                ts = pd.Timestamp(bar["bar_start_time"]).isoformat()
+                out[tf] = {
+                    "mf_delta_norm": round(float(prev["mf_delta_norm"]), 4),
+                    "retail_delta_norm": round(float(prev["retail_delta_norm"]), 4),
+                    "mf_delta": round(float(prev["mf_delta"]), 2),
+                    "live": True,
+                    "bar_start": ts,
+                }
+            elif self.history_bars.get(tf):
+                last = self.history_bars[tf][-1]
+                ts = last.get("bar_start_time")
+                out[tf] = {
+                    "mf_delta_norm": round(float(last["mf_delta_norm"]), 4),
+                    "retail_delta_norm": round(float(last["retail_delta_norm"]), 4),
+                    "mf_delta": round(float(last["mf_delta"]), 2),
+                    "live": False,
+                    "bar_start": pd.Timestamp(ts).isoformat() if ts is not None else None,
+                }
+            else:
+                out[tf] = {
+                    "mf_delta_norm": 0.0,
+                    "retail_delta_norm": 0.0,
+                    "mf_delta": 0.0,
+                    "live": False,
+                    "bar_start": None,
+                }
+        return out
 
     def _bar_footprint_live(self, tf: str) -> dict[str, Any] | None:
         """Build footprint from the in-progress open bar (O(#levels), heartbeat only)."""

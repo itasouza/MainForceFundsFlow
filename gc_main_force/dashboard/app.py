@@ -20,6 +20,7 @@ from dashboard.components import (
     build_price_chart,
     render_divergence,
     render_mf_footprint_section,
+    render_mtf_vs_footprint_note,
     render_price_line,
     render_signal_panel,
     render_status_header,
@@ -407,8 +408,9 @@ if show_footprint:
 
 with tab_op:
     st.subheader(t("mtf.title"))
-    render_tf_columns(latest)
+    render_tf_columns(latest, live_mtf=state.get("mtf_live"))
     if show_footprint:
+        render_mtf_vs_footprint_note(latest, fp_bundle, live_mtf=state.get("mtf_live"))
         st.markdown("<div style='height:2rem'></div>", unsafe_allow_html=True)
         footprint_tf = st.pills(
             t("fp.timeframe"),
@@ -453,9 +455,6 @@ with tab_mentor:
         st.caption(t("journal.near_limits"))
     with sub_stats:
         render_stats(_ROOT)
-
-engine_mode = state.get("engine") or "—"
-st.caption(t("footer", state=STATE_PATH.name, engine=engine_mode))
 
 # Auto-refresh in live view (3s — state disk writes are heartbeat/10m, not 0.5s)
 form_open = st.session_state.get("journal_form_open") or st.session_state.get("journal_close_open")

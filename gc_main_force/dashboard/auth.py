@@ -1,4 +1,8 @@
-"""Login gate. Credentials stay in .streamlit/secrets.toml, outside git."""
+"""Optional login gate via .streamlit/secrets.toml (local file — not env vars).
+
+If secrets.toml is missing, access is open (local trading workstation).
+Only when [auth] username/password are set does the login form appear.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +14,10 @@ from dashboard.i18n import t
 
 
 def _expected() -> tuple[str, str] | None:
+    """Return (user, pass) only when secrets.toml defines both; else None = open access."""
     try:
         auth = st.secrets["auth"]
-        username = str(auth["username"])
+        username = str(auth["username"]).strip()
         password = str(auth["password"])
     except Exception:
         return None
@@ -31,6 +36,12 @@ def require_login() -> None:
     if st.session_state.get("lang") not in ("pt", "en"):
         st.session_state["lang"] = "pt"
 
+    creds = _expected()
+    # No secrets.toml / no [auth] → local open access (no env vars, no blocking screen)
+    if creds is None:
+        st.session_state["logged_in"] = True
+        return
+
     st.markdown(
         "<style>[data-testid='stSidebar']{display:none}"
         "[data-testid='collapsedControl']{display:none}</style>",
@@ -46,11 +57,6 @@ def require_login() -> None:
     )
     st.title("🔒 " + t("login.title"))
     st.markdown(t("login.subtitle"))
-
-    creds = _expected()
-    if creds is None:
-        st.error(t("login.missing"))
-        st.stop()
 
     expected_user, expected_pass = creds
     _left, center, _right = st.columns([1, 2, 1])

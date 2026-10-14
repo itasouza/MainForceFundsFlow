@@ -111,6 +111,35 @@ STRINGS: dict[str, dict[str, str]] = {
         "tab.chart": "Gráficos",
         "tab.log": "Log de sinais",
         "mtf.title": "Análise Multi-Timeframe",
+        "mtf.caption": "Cartões = última barra **fechada** de cada TF (não a vela ao vivo do Ninja).",
+        "mtf.caption_live": (
+            "Cartões = barra **em formação** (atualiza a cada heartbeat). "
+            "A seta grande é o **Main Force** (lotes grandes), não o preço nem o varejo. "
+            "O **sinal composto** só muda no fechamento alinhado (1H+30m+10m)."
+        ),
+        "mtf.closed_badge": "barra fechada",
+        "mtf.live_badge": "AO VIVO",
+        "mtf.mf_label": "lado = Main Force",
+        "mtf.note_retail_buy": "Varejo comprando — MF ainda sem lote grande",
+        "mtf.note_retail_sell": "Varejo vendendo — MF ainda sem lote grande",
+        "mtf.hint_retail_only_buy": (
+            "Preço/varejo/footprint podem parecer comprados, mas o **Main Force está neutro (MF≈0)**. "
+            "Sem lotes grandes o painel fica NEUTRO — não é o mesmo que “tudo comprado”."
+        ),
+        "mtf.hint_retail_only_sell": (
+            "Preço/varejo/footprint podem parecer vendidos, mas o **Main Force está neutro (MF≈0)**."
+        ),
+        "mtf.closed_at": "Sinal MTF em {ts} (Brasília)",
+        "mtf.signal_closed_at": "Último sinal composto: {ts} (Brasília)",
+        "mtf.vs_fp": (
+            "MTF (MF) aponta **{mtf}**, mas o footprint **ao vivo** aponta **{fp}**. "
+            "Footprint usa fluxo Lee-Ready (pode incluir lote pequeno); MF só conta lote grande."
+        ),
+        "alert.wait_close_title": "AGUARDANDO FECHAMENTO 10m",
+        "alert.wait_close_msg": (
+            "Ainda não há sinal composto nesta sessão do engine. "
+            "Espere o primeiro fechamento da barra 10m."
+        ),
         "fp.timeframe": "Timeframe do footprint",
         "chart.title": "Preço GC (10m) + marcadores de sinal",
         "log.empty": "Sem sinais ainda.",
@@ -286,6 +315,35 @@ STRINGS: dict[str, dict[str, str]] = {
         "tab.chart": "Charts",
         "tab.log": "Signal log",
         "mtf.title": "Multi-Timeframe Analysis",
+        "mtf.caption": "Cards = last **closed** bar on each TF (not the live Ninja candle).",
+        "mtf.caption_live": (
+            "Cards = **forming** bar (updates every heartbeat). "
+            "The big arrow is **Main Force** (large lots), not price or retail. "
+            "The **composite signal** only changes on aligned closes (1H+30m+10m)."
+        ),
+        "mtf.closed_badge": "closed bar",
+        "mtf.live_badge": "LIVE",
+        "mtf.mf_label": "side = Main Force",
+        "mtf.note_retail_buy": "Retail buying — no large MF lot yet",
+        "mtf.note_retail_sell": "Retail selling — no large MF lot yet",
+        "mtf.hint_retail_only_buy": (
+            "Price/retail/footprint may look bought, but **Main Force is flat (MF≈0)**. "
+            "Without large lots the panel stays NEUTRAL — that is not the same as “all bought”."
+        ),
+        "mtf.hint_retail_only_sell": (
+            "Price/retail/footprint may look sold, but **Main Force is flat (MF≈0)**."
+        ),
+        "mtf.closed_at": "MTF signal at {ts} (Brasília)",
+        "mtf.signal_closed_at": "Last composite signal: {ts} (Brasília)",
+        "mtf.vs_fp": (
+            "MTF (MF) leans **{mtf}**, but the **live** footprint leans **{fp}**. "
+            "Footprint uses Lee-Ready flow (can include small lots); MF only counts large lots."
+        ),
+        "alert.wait_close_title": "WAITING FOR 10m CLOSE",
+        "alert.wait_close_msg": (
+            "There is no composite signal yet in this engine session. "
+            "Wait for the first 10m bar close."
+        ),
         "fp.timeframe": "Footprint timeframe",
         "chart.title": "GC price (10m) + signal markers",
         "log.empty": "No signals yet.",
@@ -384,12 +442,43 @@ _PLAYBOOK_COPY: dict[str, dict[str, str]] = {
         "pb.4.rule": "Saia quando o fluxo institucional do 10m virar negativo. Não use alvo fixo.",
         "pb.5.title": "Sessão importa",
         "pb.5.rule": "Evite operar na sessão asiática. Foque em Londres (04:00 BRT) e Nova York (09:30 BRT).",
-        "pb.6.title": "Sem sinal, sem operação",
-        "pb.6.rule": "Se o sinal composto estiver neutro, não opere. O mercado está sem direção institucional.",
+        "pb.6.title": "Sem sinal composto, sem operação",
+        "pb.6.rule": (
+            "Sinal composto = 1H + 30m + 10m alinhados no **fechamento**. "
+            "Cartões AO VIVO verdes ainda são NEUTRO até as barras fecharem."
+        ),
+        "side.buy": "compra",
+        "side.sell": "venda",
         "alert.div_title": "DIVERGÊNCIA DETECTADA",
         "alert.div_msg": "Regra #2: oportunidade contrária ao varejo.",
         "alert.flat_title": "SINAL NEUTRO",
-        "alert.flat_msg": "Regra #6: não opere. Sem direção institucional.",
+        "alert.flat_msg": (
+            "Regra #6: não force entrada. Os 3 timeframes não estão alinhados "
+            "({sides})."
+        ),
+        "alert.wait_live_title": "FLUXO AO VIVO ALINHADO",
+        "alert.wait_live_msg": (
+            "Regra #6: 10m · 30m · 1H já puxam para {direction} na barra aberta "
+            "({sides}). O sinal composto só confirma no **fechamento** das barras — "
+            "não force a entrada ainda."
+        ),
+        "alert.wait_1h_title": "AGUARDANDO 1H",
+        "alert.wait_1h_msg": (
+            "Regra #6: 10m/30m já puxam para {direction}, mas o sinal composto "
+            "só libera quando o **1H** ultrapassar o limiar. ({sides})"
+        ),
+        "alert.wait_lower_title": "AGUARDANDO 10m/30m",
+        "alert.wait_lower_msg": (
+            "Regra #6: o 1H puxa para {direction}, mas falta o 10m e o 30m "
+            "confirmarem o mesmo lado. ({sides})"
+        ),
+        "alert.mixed_msg": (
+            "Regra #6: timeframes mistos — sem alinhamento institucional. ({sides})"
+        ),
+        "alert.fp_vs_signal": (
+            "Footprint 10m mostra absorção local (preço). "
+            "Isso **não** substitui o sinal composto MTF — use como zona, não como liberação."
+        ),
         "alert.abs_title": "PREÇO PRÓXIMO DA ABSORÇÃO",
         "alert.abs_msg": "Regra #3: {ticks} ticks de ${level}.",
         "alert.session_title": "FORA DO FOCO",
@@ -451,12 +540,43 @@ _PLAYBOOK_COPY: dict[str, dict[str, str]] = {
         "pb.4.rule": "Exit when the 10m institutional flow turns negative. Do not use a fixed target.",
         "pb.5.title": "Session matters",
         "pb.5.rule": "Avoid the Asian session. Focus on London (04:00 BRT) and New York (09:30 BRT).",
-        "pb.6.title": "No signal, no trade",
-        "pb.6.rule": "If the composite signal is neutral, do not trade. There is no institutional direction.",
+        "pb.6.title": "No composite signal, no trade",
+        "pb.6.rule": (
+            "Composite = 1H + 30m + 10m aligned on **bar close**. "
+            "Green LIVE cards are still NEUTRAL until those bars close."
+        ),
+        "side.buy": "buy",
+        "side.sell": "sell",
         "alert.div_title": "DIVERGENCE DETECTED",
         "alert.div_msg": "Rule #2: a chance to trade against retail noise.",
         "alert.flat_title": "NEUTRAL SIGNAL",
-        "alert.flat_msg": "Rule #6: do not trade. No institutional direction.",
+        "alert.flat_msg": (
+            "Rule #6: do not force an entry. The 3 timeframes are not aligned "
+            "({sides})."
+        ),
+        "alert.wait_live_title": "LIVE FLOW ALIGNED",
+        "alert.wait_live_msg": (
+            "Rule #6: 10m · 30m · 1H already lean {direction} on the open bar "
+            "({sides}). The composite only confirms on **bar close** — "
+            "do not force an entry yet."
+        ),
+        "alert.wait_1h_title": "WAITING ON 1H",
+        "alert.wait_1h_msg": (
+            "Rule #6: 10m/30m already lean {direction}, but the composite "
+            "only unlocks when **1H** clears its threshold. ({sides})"
+        ),
+        "alert.wait_lower_title": "WAITING ON 10m/30m",
+        "alert.wait_lower_msg": (
+            "Rule #6: 1H leans {direction}, but 10m and 30m still need to "
+            "confirm the same side. ({sides})"
+        ),
+        "alert.mixed_msg": (
+            "Rule #6: mixed timeframes — no institutional alignment. ({sides})"
+        ),
+        "alert.fp_vs_signal": (
+            "The 10m footprint shows local absorption (price). "
+            "It does **not** replace the MTF composite — use it as a zone, not a green light."
+        ),
         "alert.abs_title": "PRICE NEAR ABSORPTION",
         "alert.abs_msg": "Rule #3: {ticks} ticks from ${level}.",
         "alert.session_title": "OUTSIDE THE FOCUS",

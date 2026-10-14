@@ -104,25 +104,59 @@ def _diverging_bar(value: float, color: str, scale: float = 1.0) -> str:
     )
 
 
-def render_tf_columns(payload: dict[str, Any] | None) -> None:
-    if not payload or "timeframes" not in payload:
+def _side_from_norm(norm: float, thr: float = 0.02) -> str:
+    if norm > thr:
+        return "buy"
+    if norm < -thr:
+        return "sell"
+    return "flat"
+
+
+def render_tf_columns(
+    payload: dict[str, Any] | None,
+    live_mtf: dict[str, Any] | None = None,
+) -> None:
+    """
+    Show MTF cards from open bars when ``live_mtf`` is present (heartbeat).
+
+    Composite signal still comes from closed bars in ``payload`` — cards are for
+    freshness so 30m/1H are not stuck on the last close for many minutes.
+    """
+    live_mtf = live_mtf or {}
+    closed_tfs = (payload or {}).get("timeframes") or {}
+    if not live_mtf and not closed_tfs:
         st.write(t("mtf.empty"))
         return
-    tfs = payload["timeframes"]
+
+    st.caption(t("mtf.caption_live"))
+    if payload and payload.get("timestamp"):
+        st.caption(t("mtf.signal_closed_at", ts=fmt_br(payload.get("timestamp"))))
+
     cols = st.columns(3)
     for col, key in zip(cols, ("10m", "30m", "1H")):
         with col:
-            data = tfs.get(key, {})
+            data = live_mtf.get(key) or closed_tfs.get(key) or {}
+            is_live = bool(data.get("live", bool(live_mtf.get(key))))
             mf = float(data.get("mf_delta_norm", 0))
             rt = float(data.get("retail_delta_norm", 0))
             abs_delta = float(data.get("mf_delta", 0))
-            if mf > 0.02:
+            side = _side_from_norm(mf)
+            rt_side = _side_from_norm(rt)
+            if side == "buy":
                 color, arrow, label = _BUY, "↑", t("side.buy")
-            elif mf < -0.02:
+            elif side == "sell":
                 color, arrow, label = _SELL, "↓", t("side.sell")
             else:
                 color, arrow, label = _FLAT, "→", t("side.flat")
-            rt_color = _BUY if rt > 0.02 else (_SELL if rt < -0.02 else _FLAT)
+            rt_color = _BUY if rt_side == "buy" else (_SELL if rt_side == "sell" else _FLAT)
+            badge = t("mtf.live_badge") if is_live else t("mtf.closed_badge")
+            badge_color = "#38bdf8" if is_live else "#9ca3af"
+            # When MF is flat but retail leans, say so — avoids "all bought" vs NEUTRO confusion
+            note = ""
+            if side == "flat" and rt_side == "buy":
+                note = f"<div style='font-size:0.72rem;color:{_BUY};margin-top:.25rem'>{t('mtf.note_retail_buy')}</div>"
+            elif side == "flat" and rt_side == "sell":
+                note = f"<div style='font-size:0.72rem;color:{_SELL};margin-top:.25rem'>{t('mtf.note_retail_sell')}</div>"
             st.markdown(
                 f"""
                 <div style="border:1px solid {color};border-radius:10px;padding:0.5rem 0.8rem;">
@@ -130,16 +164,55 @@ def render_tf_columns(payload: dict[str, Any] | None) -> None:
                     <b>{key}</b>
                     <span style="color:{color};font-weight:700;font-size:0.9rem;">{arrow} {label}</span>
                   </div>
+                  <div style="font-size:0.7rem;color:{badge_color};margin-top:.1rem;font-weight:600;">{badge} · {t('mtf.mf_label')}</div>
                   <div style="display:flex;justify-content:space-between;font-size:0.8rem;margin-top:0.2rem;">
                     <span><span style="opacity:.6">MF</span> <b style="color:{color}">{mf:+.3f}</b></span>
                     <span><span style="opacity:.6">{t("retail")}</span> <b style="color:{rt_color}">{rt:+.3f}</b></span>
                   </div>
                   {_diverging_bar(mf, color)}
                   <div style="font-size:0.75rem;opacity:.8;">{t("mf_delta", n=f"{abs_delta:+,.0f}")}</div>
+                  {note}
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
+
+    # Global hint when all live MF flat but retail/footprint look one-sided
+    if live_mtf:
+        mf_sides = [_side_from_norm(float((live_mtf.get(k) or {}).get("mf_delta_norm", 0))) for k in ("10m", "30m", "1H")]
+        rt_sides = [_side_from_norm(float((live_mtf.get(k) or {}).get("retail_delta_norm", 0))) for k in ("10m", "30m", "1H")]
+        if all(s == "flat" for s in mf_sides) and any(s == "buy" for s in rt_sides):
+            st.info(t("mtf.hint_retail_only_buy"))
+        elif all(s == "flat" for s in mf_sides) and any(s == "sell" for s in rt_sides):
+            st.info(t("mtf.hint_retail_only_sell"))
+
+
+def render_mtf_vs_footprint_note(
+    latest: dict[str, Any] | None,
+    footprint_bundle: dict[str, Any] | None,
+    live_mtf: dict[str, Any] | None = None,
+) -> None:
+    """Warn when live/closed MTF 10m side disagrees with live footprint absorption."""
+    if not footprint_bundle:
+        return
+    tfs = (live_mtf or {}).get("10m") or ((latest or {}).get("timeframes") or {}).get("10m") or {}
+    mf = float(tfs.get("mf_delta_norm", 0.0))
+    mtf_side = _side_from_norm(mf)
+    fp = (footprint_bundle.get("10m") or {}) if isinstance(footprint_bundle, dict) else {}
+    if not fp.get("live"):
+        return
+    abs_vol = float(fp.get("absorption_volume") or 0.0)
+    if abs_vol == 0:
+        return
+    fp_side = "buy" if abs_vol > 0 else "sell"
+    if mtf_side in ("buy", "sell") and fp_side != mtf_side:
+        st.warning(
+            t(
+                "mtf.vs_fp",
+                mtf=t(f"side.{mtf_side}"),
+                fp=t(f"side.{fp_side}"),
+            )
+        )
 
 
 def render_divergence(payload: dict[str, Any] | None) -> None:
