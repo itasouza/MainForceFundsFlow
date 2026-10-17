@@ -52,7 +52,7 @@ from python_engine.state_store import EngineStateStore
 from python_engine.tick_receiver import load_ticks_csv
 
 st.set_page_config(
-    page_title="GC Main Force Flow",
+    page_title="Main Force Flow",
     page_icon="🥇",
     layout="wide",
 )
@@ -363,16 +363,25 @@ def _render_dashboard() -> None:
         ]
     )
     ts = f" · {fmt_br(latest.get('timestamp'))} ({t('brasilia')})" if latest else ""
+    symbol = (
+        state.get("symbol")
+        or (latest or {}).get("symbol")
+        or "—"
+    )
+    feed = state.get("tick_source") or ""
+    feed_txt = f" · {feed}" if feed else ""
 
     with head_left:
         st.markdown(
             "<div style='display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem'>"
-            "<span style='font-size:1.3rem;font-weight:700'>🥇 GC Main Force Flow</span>"
+            "<span style='font-size:1.3rem;font-weight:700'>🥇 Main Force Flow</span>"
+            f"<span style='background:#1e293b;color:#f8fafc;font-weight:700;padding:.25rem .7rem;"
+            f"border-radius:8px;border:1px solid #38bdf8;letter-spacing:.04em'>{symbol}</span>"
             f"<span style='font-weight:600'>{status}</span>"
             f"<span style='background:{sig_color};color:#fff;font-weight:700;padding:.3rem .9rem;border-radius:8px'>{sig_txt}</span>"
             f"{badge_html(active_rule)}"
             f"{age_html}"
-            f"<span style='font-size:.75rem;opacity:.55'>{ts.lstrip(' · ')}</span>"
+            f"<span style='font-size:.75rem;opacity:.55'>{ts.lstrip(' · ')}{feed_txt}</span>"
             "</div>",
             unsafe_allow_html=True,
         )

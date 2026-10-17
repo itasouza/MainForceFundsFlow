@@ -15,7 +15,12 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from python_engine.config import get_config
+from python_engine.config import (
+    SYMBOL_PROFILES,
+    apply_symbol_profile,
+    get_config,
+    resolve_tick_endpoint,
+)
 from python_engine.incremental_engine import IncrementalMTFEngine
 from python_engine.mtf_aggregator import TIMEFRAMES, build_all_timeframes, get_context_at_time
 from python_engine.regime_classifier import MarketRegimeClassifier, load_ai_controls
@@ -147,10 +152,14 @@ def run_live_incremental(cfg: dict, store: EngineStateStore) -> None:
     - Lightweight heartbeat every ``heartbeat_persist_sec`` (dashboard LIVE/price/ticks)
     - Full signal + ZMQ publish on 10m bar close
     """
-    transport = str(cfg.get("nt_tick_transport", "zmq"))
+    endpoint, transport, topic = resolve_tick_endpoint(cfg)
+    # Keep legacy keys in sync so heartbeats / UI see the active feed
+    cfg["nt_zmq_subscribe"] = endpoint
+    cfg["nt_tick_transport"] = transport
+    cfg["nt_zmq_topic"] = topic
     sub = NtTickSubscriber(
-        endpoint=str(cfg["nt_zmq_subscribe"]),
-        topic=str(cfg["nt_zmq_topic"]),
+        endpoint=endpoint,
+        topic=topic,
         transport=transport,
     )
     publisher = SignalPublisher(
@@ -168,8 +177,11 @@ def run_live_incremental(cfg: dict, store: EngineStateStore) -> None:
     if heartbeat_sec <= 0:
         heartbeat_sec = 2.0
 
+    source = str(cfg.get("tick_source", "ninjatrader"))
+    profile = str(cfg.get("active_profile", "live_gc"))
     store.update(mode="live", live=False, tick_count=0, engine="incremental", persist=True)
-    print(f"Listening ticks (incremental/{transport}): {cfg['nt_zmq_subscribe']} topic={cfg['nt_zmq_topic']}")
+    print(f"Tick source: {source} · profile: {profile} · symbol: {cfg.get('symbol')}")
+    print(f"Listening ticks (incremental/{transport}): {endpoint} topic={topic}")
     print(f"Publishing signals: {cfg['signal_zmq_publish']} topic={cfg['signal_zmq_topic']}")
     print(f"Dashboard heartbeat every {heartbeat_sec:.1f}s; composite signal on 10m close.")
     print(f"AI regime model: {model_path if model_path and model_path.exists() else 'default/fallback'}")
@@ -278,10 +290,13 @@ def _incremental_recv_loop(
 def run_live_batch(cfg: dict, store: EngineStateStore) -> None:
     """Legacy full-recompute live path (kept for comparison / debugging)."""
     buffer = TickBuffer(max_hours=float(cfg["tick_buffer_hours"]))
-    transport = str(cfg.get("nt_tick_transport", "zmq"))
+    endpoint, transport, topic = resolve_tick_endpoint(cfg)
+    cfg["nt_zmq_subscribe"] = endpoint
+    cfg["nt_tick_transport"] = transport
+    cfg["nt_zmq_topic"] = topic
     sub = NtTickSubscriber(
-        endpoint=str(cfg["nt_zmq_subscribe"]),
-        topic=str(cfg["nt_zmq_topic"]),
+        endpoint=endpoint,
+        topic=topic,
         transport=transport,
     )
     publisher = SignalPublisher(
@@ -292,7 +307,7 @@ def run_live_batch(cfg: dict, store: EngineStateStore) -> None:
     published: set[str] = set()
 
     store.update(mode="live", live=False, tick_count=0, engine="batch")
-    print(f"Listening ticks (batch/{transport}): {cfg['nt_zmq_subscribe']} topic={cfg['nt_zmq_topic']}")
+    print(f"Listening ticks (batch/{transport}): {endpoint} topic={topic}")
     print(f"Publishing signals: {cfg['signal_zmq_publish']} topic={cfg['signal_zmq_topic']}")
 
     t = threading.Thread(
@@ -369,11 +384,29 @@ def main() -> None:
     parser.add_argument("--csv", type=Path, default=None, help="CSV for backtest mode")
     parser.add_argument("--publish", action="store_true", help="Publish ZMQ signals in backtest")
     parser.add_argument("--state-file", type=Path, default=None)
+    parser.add_argument(
+        "--source",
+        choices=["ninjatrader", "bookmap"],
+        default=None,
+        help="Tick feed: ninjatrader (:5556) or bookmap (:5558)",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=sorted(SYMBOL_PROFILES.keys()),
+        default=None,
+        help="Symbol/threshold profile (e.g. simulator_btc, live_gc)",
+    )
     args = parser.parse_args()
 
     cfg = get_config()
     if args.mode:
         cfg["mode"] = args.mode
+    if args.source:
+        cfg["tick_source"] = args.source
+    if args.profile:
+        apply_symbol_profile(cfg, args.profile)
+    elif cfg.get("active_profile") in SYMBOL_PROFILES:
+        apply_symbol_profile(cfg, str(cfg["active_profile"]))
     state_path = args.state_file or Path(__file__).resolve().parents[1] / cfg["state_file"]
     store = EngineStateStore(state_path)
 

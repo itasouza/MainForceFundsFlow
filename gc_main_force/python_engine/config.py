@@ -49,6 +49,31 @@ PARAM_PROFILES: dict[int, dict[str, Any]] = {
 
 _MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 
+# Perfis por mercado / fonte (simulador Bookmap → live depois)
+SYMBOL_PROFILES: dict[str, dict[str, Any]] = {
+    "live_gc": {
+        "symbol": "GC",
+        "tick_size": 0.10,
+        "contract_size_oz": 100,
+        "mf_fixed_threshold_contracts": 10,
+        "mf_dynamic_percentile": 90,
+        "threshold_1h": 0.15,
+        "threshold_30m": 0.20,
+        "threshold_10m": 0.30,
+    },
+    # Bookmap simulador (ex.: BTC-USDT no sábado) — calibração inicial
+    "simulator_btc": {
+        "symbol": "BTC-USDT",
+        "tick_size": 0.1,
+        "contract_size_oz": 1,
+        "mf_fixed_threshold_contracts": 1,
+        "mf_dynamic_percentile": 90,
+        "threshold_1h": 0.15,
+        "threshold_30m": 0.20,
+        "threshold_10m": 0.30,
+    },
+}
+
 CONFIG: dict[str, Any] = {
     "mode": "live",  # "live" or "backtest"
     "symbol": "GC",
@@ -59,12 +84,18 @@ CONFIG: dict[str, Any] = {
     # Thin Asian tape often prints 1-lots — mf_only=True leaves the chart empty.
     "footprint_mf_only": False,
     "mf_footprint_min_contracts": 1,
+    # Tick source: "ninjatrader" | "bookmap"
+    "tick_source": "ninjatrader",
+    "active_profile": "live_gc",
     # NinjaTrader tick feed
     # "zmq" = AddOn GcTickPublisher (NetMQ PUB, production)
     # "tcp" = Indicator GC Tick Publisher (JSON lines, fallback)
     "nt_tick_transport": "tcp",
     "nt_zmq_subscribe": "tcp://localhost:5556",
     "nt_zmq_topic": "gc_ticks",
+    # Bookmap Python API publisher (bm_tick_publisher.py)
+    "bookmap_tcp_subscribe": "tcp://localhost:5558",
+    "bookmap_tick_transport": "tcp",
     # Signal ZeroMQ (signals out)
     "signal_zmq_publish": "tcp://*:5555",
     "signal_zmq_topic": "gold_mtf_flow",
@@ -108,6 +139,39 @@ def get_config(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     if overrides:
         cfg.update(overrides)
     return cfg
+
+
+def apply_symbol_profile(cfg: dict[str, Any], profile_name: str) -> dict[str, Any]:
+    """Apply SYMBOL_PROFILES[name] (tick size, MF floor, thresholds, symbol)."""
+    profile = SYMBOL_PROFILES.get(profile_name)
+    if not profile:
+        raise KeyError(
+            f"Unknown profile '{profile_name}'. "
+            f"Available: {', '.join(sorted(SYMBOL_PROFILES))}"
+        )
+    cfg.update(deepcopy(profile))
+    cfg["active_profile"] = profile_name
+    return cfg
+
+
+def resolve_tick_endpoint(cfg: dict[str, Any]) -> tuple[str, str, str]:
+    """
+    Return (endpoint, transport, topic) for the configured tick_source.
+
+    Bookmap always uses TCP JSON lines on :5558 by default.
+    """
+    source = str(cfg.get("tick_source", "ninjatrader")).lower()
+    if source == "bookmap":
+        return (
+            str(cfg.get("bookmap_tcp_subscribe", "tcp://localhost:5558")),
+            str(cfg.get("bookmap_tick_transport", "tcp")),
+            "bookmap_ticks",
+        )
+    return (
+        str(cfg["nt_zmq_subscribe"]),
+        str(cfg.get("nt_tick_transport", "tcp")),
+        str(cfg.get("nt_zmq_topic", "gc_ticks")),
+    )
 
 
 def apply_regime_profile(cfg: dict[str, Any], regime: int) -> dict[str, Any]:

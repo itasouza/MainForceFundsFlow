@@ -231,6 +231,7 @@ class IncrementalMTFEngine:
 
         self.last_known_direction = 0  # 1 buyer, -1 seller
         self.last_price: float | None = None
+        self.last_symbol: str = str(config.get("symbol") or "GC")
         self.last_tick_ts: pd.Timestamp | None = None
         self.tick_count = 0
         self.session_open_price: float | None = None
@@ -273,6 +274,9 @@ class IncrementalMTFEngine:
 
         self.tick_count += 1
         self.last_tick_ts = ts
+        sym = tick.get("symbol")
+        if sym:
+            self.last_symbol = str(sym)
         if self.session_open_price is None:
             self.session_open_price = price
 
@@ -319,6 +323,9 @@ class IncrementalMTFEngine:
             "mode": "live",
             "live": True,
             "tick_count": self.tick_count,
+            "symbol": self.last_symbol or str(self.config.get("symbol") or "GC"),
+            "active_profile": self.config.get("active_profile"),
+            "tick_source": self.config.get("tick_source"),
             "last_price": self.last_price,
             "session_open_price": self.session_open_price,
             "latest_signal": self._last_payload,
