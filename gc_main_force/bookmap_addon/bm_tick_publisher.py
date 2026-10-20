@@ -18,6 +18,7 @@ import socket
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import bookmap as bm
@@ -25,6 +26,11 @@ import bookmap as bm
 # Porta dedicada ao Bookmap (NT usa 5556).
 TCP_HOST = "0.0.0.0"
 TCP_PORT = 5558
+
+# Fotos do book (para estudar faixas de liquidez); não passam pela porta do engine.
+DEPTH_DIR = Path(r"C:\MainForceFundsFlow\gc_main_force\data_depth")
+DEPTH_SNAPSHOT_SECONDS = 5.0
+DEPTH_SNAPSHOT_LEVELS = 40  # níveis de preço para cada lado do meio
 
 # Estado por instrumento (alias Bookmap)
 _instruments: dict[str, dict[str, Any]] = {}
@@ -229,6 +235,38 @@ def on_interval(addon: Any, alias: str) -> None:
     pass
 
 
+def _write_depth_snapshots() -> None:
+    """Foto do book (níveis perto do preço) em JSONL, separada do fluxo de ticks do engine."""
+    now = _iso_utc_now()
+    for alias, meta in list(_instruments.items()):
+        try:
+            pips = float(meta["pips"])
+            size_mult = float(meta["size_multiplier"]) or 1.0
+            bids = list(meta["bids"].items())
+            asks = list(meta["asks"].items())
+            best_bid = meta.get("best_bid")
+            best_ask = meta.get("best_ask")
+            if not bids or not asks or best_bid is None or best_ask is None:
+                continue
+            mid_level = (best_bid + best_ask) / 2.0 / pips
+            lo, hi = mid_level - DEPTH_SNAPSHOT_LEVELS, mid_level + DEPTH_SNAPSHOT_LEVELS
+            rec = {
+                "timestamp": now,
+                "symbol": meta.get("symbol") or _derive_symbol(alias, meta.get("full_name", "")),
+                "bid": round(best_bid, 8),
+                "ask": round(best_ask, 8),
+                "bids": [[round(p * pips, 8), round(s / size_mult, 4)] for p, s in bids if lo <= p <= hi],
+                "asks": [[round(p * pips, 8), round(s / size_mult, 4)] for p, s in asks if lo <= p <= hi],
+            }
+            DEPTH_DIR.mkdir(parents=True, exist_ok=True)
+            day = datetime.now(timezone.utc).strftime("%Y%m%d")
+            path = DEPTH_DIR / f"{rec['symbol']}_{day}_depth.jsonl"
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        except Exception as exc:  # nunca derruba o publisher de ticks
+            print(f"[bm_tick_publisher] depth snapshot falhou: {exc}")
+
+
 def main() -> None:
     stop = threading.Event()
     acceptor = threading.Thread(target=_accept_loop, args=(stop,), daemon=True)
@@ -245,7 +283,8 @@ def main() -> None:
     try:
         # Mantém o script vivo; Bookmap dirige os callbacks
         while True:
-            time.sleep(5.0)
+            time.sleep(DEPTH_SNAPSHOT_SECONDS)
+            _write_depth_snapshots()
             with _clients_lock:
                 n_cli = len(_clients)
             if _ticks_sent and _ticks_sent % 500 == 0:
