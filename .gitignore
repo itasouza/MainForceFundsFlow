@@ -37,3 +37,4 @@ gc_main_force/.streamlit/secrets.toml
 
 # NinjaTrader local copies (source lives in repo)
 *.nupkg
+gc_main_force/data_ticks/

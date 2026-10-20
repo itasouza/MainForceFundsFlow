@@ -182,6 +182,14 @@ def diagnose_neutral(latest: dict[str, Any] | None, state: dict[str, Any]) -> di
                 "awaiting": "bar_close",
                 "partial": sides["1H"],
             }
+        lean = _shared_lean(classify_norms)
+        if lean:
+            return {
+                "reason": "below_threshold",
+                "sides": sides,
+                "awaiting": "threshold",
+                "partial": lean,
+            }
         return {"reason": "true_flat", "sides": sides, "awaiting": None, "partial": None}
     if h == m == tf10 and h != "flat":
         px = _price_sides(live) if live else {"10m": "flat", "30m": "flat", "1H": "flat"}
@@ -298,6 +306,26 @@ def badge_html(rule: dict) -> str:
     )
 
 
+def _shared_lean(norms: dict[str, float]) -> str | None:
+    """Same-side lean that has not cleared the entry threshold."""
+    signs: list[str] = []
+    for key in ("10m", "30m", "1H"):
+        value = float(norms.get(key) or 0.0)
+        if value > 0:
+            signs.append("buy")
+        elif value < 0:
+            signs.append("sell")
+        else:
+            signs.append("flat")
+    if "buy" in signs and "sell" in signs:
+        return None
+    if signs.count("sell") >= 2:
+        return "sell"
+    if signs.count("buy") >= 2:
+        return "buy"
+    return None
+
+
 def _direction_word(side: str | None) -> str:
     return t("side.buy") if side == "buy" else t("side.sell")
 
@@ -339,6 +367,8 @@ def _decision(ctx: dict[str, Any]) -> tuple[str, str] | None:
         )
         key = "alert.now.wait_cards" if cards_agree else "alert.now.wait_lower"
         return "warning", t(key, direction=direction)
+    if reason == "below_threshold":
+        return "warning", t("alert.now.below", direction=direction)
     if reason == "mixed":
         return "error", t("alert.now.mixed")
     return "error", t("alert.now.flat")
