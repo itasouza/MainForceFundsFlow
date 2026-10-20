@@ -35,6 +35,28 @@ from python_engine.tick_receiver import NtTickSubscriber, TickBuffer, load_ticks
 from python_engine.zmq_signal_publisher import SignalPublisher
 
 
+def _configure_stdio() -> None:
+    """Windows consoles default to cp1252; a warning emoji must not kill the feed."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
+def _log(msg: str) -> None:
+    try:
+        print(msg, flush=True)
+    except Exception:
+        return
+
+
+_configure_stdio()
+
+
 def compute_signals_from_ticks(ticks: pd.DataFrame, cfg: dict) -> tuple[list[dict], dict]:
     """Full recompute; return payloads at each 10m close + latest bars dict."""
     prepared = prepare_ticks(
@@ -246,8 +268,8 @@ def _incremental_recv_loop(
                 "features": decision.features,
             }
             if decision.changed:
-                print(
-                    f"⚠️ Regime changed to {decision.regime} ({decision.label}) "
+                _log(
+                    f"Regime changed to {decision.regime} ({decision.label}) "
                     f"via {decision.source}. Thresholds updated."
                 )
 
@@ -272,8 +294,8 @@ def _incremental_recv_loop(
             try:
                 publisher.publish(payload)
             except Exception as exc:  # noqa: BLE001
-                print(f"ZMQ publish error: {exc}")
-            print(
+                _log(f"ZMQ publish error: {exc}")
+            _log(
                 f"10m close signal={payload['composite_signal']} "
                 f"conf={payload['confidence_score']} ts={payload['timestamp']} "
                 f"regime={engine.regime_info.get('regime')}"

@@ -93,6 +93,26 @@ def _accept_loop(stop: threading.Event) -> None:
         pass
 
 
+def _derive_symbol(alias: str, full_name: str) -> str:
+    """Nome do contrato para o engine, ex.: ESZ6.CME, GCZ6.COMEX, WDOX26.
+
+    Alias típicos: "ESZ6.CME@RITHMIC", "WDOX26＠CC" (＠ fullwidth) ou "CC@WDOX26".
+    Pega a primeira parte com dígito (contrato); sem isso, usa full_name.
+    """
+    parts = [
+        p.strip()
+        for p in (alias or "").replace("＠", "@").split("@")
+        if p.strip()
+    ]
+    parts = [p.split(":")[0] for p in parts]
+    symbol = next((p for p in parts if any(ch.isdigit() for ch in p)), "")
+    if not symbol and full_name:
+        symbol = full_name.replace("＠", "@").split("@")[0].split(":")[0].strip()
+    if not symbol:
+        symbol = parts[0] if parts else "BTC-USDT"
+    return symbol.replace("/", "-")
+
+
 def handle_subscribe_instrument(
     addon: Any,
     alias: str,
@@ -106,6 +126,7 @@ def handle_subscribe_instrument(
     """Chamado quando o add-on é ativado no gráfico."""
     _instruments[alias] = {
         "full_name": full_name,
+        "symbol": _derive_symbol(alias, full_name),
         "pips": float(pips),
         "size_multiplier": float(size_multiplier) if size_multiplier else 1.0,
         "is_crypto": bool(is_crypto),
@@ -117,7 +138,10 @@ def handle_subscribe_instrument(
     # Trades + depth (para BBO / Lee-Ready)
     bm.subscribe_to_trades(addon, alias, _next_req())
     bm.subscribe_to_depth(addon, alias, _next_req())
-    print(f"[bm_tick_publisher] subscribe {alias} ({full_name}) pips={pips}")
+    print(
+        f"[bm_tick_publisher] subscribe alias={alias!r} full_name={full_name!r} "
+        f"symbol={_instruments[alias]['symbol']!r} pips={pips}"
+    )
 
 
 def handle_unsubscribe_instrument(addon: Any, alias: str) -> None:
@@ -181,10 +205,7 @@ def handle_trades(
             bid = price
             ask = price + pips
 
-    # Símbolo curto para o engine (último segmento do alias)
-    symbol = alias.split("@")[-1].split(":")[-1] if alias else "BTC-USDT"
-    if "/" in symbol:
-        symbol = symbol.replace("/", "-")
+    symbol = meta.get("symbol") or _derive_symbol(alias, meta.get("full_name", ""))
 
     line = (
         json.dumps(

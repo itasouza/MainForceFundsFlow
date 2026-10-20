@@ -105,6 +105,35 @@ def test_incremental_engine() -> None:
     )
 
 
+def test_foreign_instrument_is_dropped() -> None:
+    from python_engine.incremental_engine import IncrementalMTFEngine
+
+    cfg = get_config({"mode": "live", "symbol": "ES", "tick_size": 0.25})
+    engine = IncrementalMTFEngine(cfg)
+    base = {
+        "timestamp": "2026-10-19T01:50:00Z",
+        "symbol": "BMD",
+        "volume": 2,
+        "bid": 7744.75,
+        "ask": 7745.25,
+    }
+    engine.process_tick({**base, "price": 7745.0})
+    engine.process_tick({**base, "price": 7745.25, "timestamp": "2026-10-19T01:50:01Z"})
+    foreign = engine.process_tick(
+        {**base, "price": 82520.0, "timestamp": "2026-10-19T01:50:02Z", "symbol": "BTC"}
+    )
+    assert foreign.signal_payload is None
+    assert engine.tick_count == 2
+    assert engine.foreign_tick_count == 1
+    assert engine.last_price == 7745.25
+    assert engine.last_foreign_price == 82520.0
+    bar = engine.current_bars["10m"]
+    assert bar["high"] < 8000
+    snap = engine.snapshot_state()
+    assert snap["foreign_tick_count"] == 1
+    print("OK foreign instrument dropped")
+
+
 def test_regime_classifier_fallback() -> None:
     from python_engine.regime_classifier import MarketRegimeClassifier
 
@@ -205,6 +234,7 @@ if __name__ == "__main__":
     write_sample_csv(sample)
     test_lee_ready_and_mf()
     test_incremental_engine()
+    test_foreign_instrument_is_dropped()
     test_regime_classifier_fallback()
     test_signal_pipeline()
     test_zmq_pubsub()

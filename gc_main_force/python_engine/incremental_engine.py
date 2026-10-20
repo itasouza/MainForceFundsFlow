@@ -19,6 +19,10 @@ from python_engine.signal_engine import (
 
 TF_KEYS = ("10m", "30m", "1H")
 TF_FLOOR = {"10m": "10min", "30m": "30min", "1H": "1h"}
+# Bookmap broadcasts every chart that has the add-on on one socket.
+# A second instrument (e.g. BTC at 82500 next to ES at 7745) must not
+# enter the same candle — that stretch freezes the chart scale.
+FOREIGN_PRICE_JUMP = 0.20
 
 
 @dataclass
@@ -234,6 +238,8 @@ class IncrementalMTFEngine:
         self.last_symbol: str = str(config.get("symbol") or "GC")
         self.last_tick_ts: pd.Timestamp | None = None
         self.tick_count = 0
+        self.foreign_tick_count = 0
+        self.last_foreign_price: float | None = None
         self.session_open_price: float | None = None
 
         self._closed_10m_this_tick = False
@@ -253,6 +259,13 @@ class IncrementalMTFEngine:
         self.footprint_mf_only = bool(self.config.get("footprint_mf_only", False))
         self.fp_min = float(self.config.get("mf_footprint_min_contracts", 1))
 
+    def _is_foreign_price(self, price: float) -> bool:
+        """True when this print belongs to a different instrument on the same socket."""
+        anchor = self.last_price
+        if anchor is None or anchor <= 0 or price <= 0:
+            return False
+        return abs(price - anchor) / anchor > FOREIGN_PRICE_JUMP
+
     def process_tick(self, tick: dict[str, Any]) -> TickResult:
         """
         Ingest one tick in amortized O(1).
@@ -264,6 +277,10 @@ class IncrementalMTFEngine:
         price = float(tick["price"])
         volume = float(tick["volume"])
         if volume <= 0:
+            return TickResult()
+        if self._is_foreign_price(price):
+            self.foreign_tick_count += 1
+            self.last_foreign_price = price
             return TickResult()
 
         ts = pd.Timestamp(tick["timestamp"])
@@ -323,6 +340,8 @@ class IncrementalMTFEngine:
             "mode": "live",
             "live": True,
             "tick_count": self.tick_count,
+            "foreign_tick_count": self.foreign_tick_count,
+            "last_foreign_price": self.last_foreign_price,
             "symbol": self.last_symbol or str(self.config.get("symbol") or "GC"),
             "active_profile": self.config.get("active_profile"),
             "tick_source": self.config.get("tick_source"),

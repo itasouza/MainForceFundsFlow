@@ -61,6 +61,29 @@ SYMBOL_PROFILES: dict[str, dict[str, Any]] = {
         "threshold_30m": 0.20,
         "threshold_10m": 0.30,
     },
+    # Mini dólar B3 (WDO) via Bookmap + Cedro, tick 0.5.
+    # TODO: mf_fixed_threshold_contracts=20 é chute inicial — calibrar com o volume real.
+    "live_wdo": {
+        "symbol": "WDO",
+        "tick_size": 0.5,
+        "contract_size_oz": 1,
+        "mf_fixed_threshold_contracts": 20,
+        "mf_dynamic_percentile": 90,
+        "threshold_1h": 0.15,
+        "threshold_30m": 0.20,
+        "threshold_10m": 0.30,
+    },
+    # Bookmap com ES (E-mini S&P, tick 0.25) — teste do pipeline, dados atrasados 15 min
+    "simulator_es": {
+        "symbol": "ES",
+        "tick_size": 0.25,
+        "contract_size_oz": 1,
+        "mf_fixed_threshold_contracts": 10,
+        "mf_dynamic_percentile": 90,
+        "threshold_1h": 0.15,
+        "threshold_30m": 0.20,
+        "threshold_10m": 0.30,
+    },
     # Bookmap simulador (ex.: BTC-USDT no sábado) — calibração inicial
     "simulator_btc": {
         "symbol": "BTC-USDT",

@@ -52,6 +52,26 @@ python -m python_engine.main --mode live --source bookmap --profile live_gc
 python -m python_engine.main --mode live --source ninjatrader --profile live_gc
 ```
 
+## WDO (mini dólar B3) via Cedro
+
+1. No Bookmap, conecte ao feed Cedro (B3) e abra o contrato vigente (ex.: `WDOX26`).
+2. Rode `bm_tick_publisher.py` e ative o add-on no gráfico. O log mostra
+   `alias=... full_name=... symbol=...`; o `symbol` publicado deve ser `WDOX26`
+   (o publisher usa a parte do alias que contém dígitos; se não houver, o `full_name`).
+3. Engine (tick size 0.5):
+
+```bash
+python -m python_engine.main --mode live --source bookmap --profile live_wdo
+```
+
+O perfil `live_wdo` usa `mf_fixed_threshold_contracts = 20` como **valor inicial** —
+precisa de ajuste conforme o volume típico do WDO no seu horário.
+
+**Atenção — publisher órfão:** no Windows, um `bm_tick_publisher.py` antigo ainda vivo
+continua atendendo a porta 5558 e o novo não consegue assumi-la; nenhum tick chega ao engine
+(ou chegam com o símbolo antigo). Antes de reativar o add-on, confirme que não há outro
+processo na 5558 (`netstat -ano | findstr :5558`) e encerre o antigo.
+
 ## Portas
 
 | Fonte        | Porta | Config                         |

@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from dashboard.i18n import session_label, source_label, t, translate_divergence
+from dashboard.i18n import session_label, source_label, t
 
 
 SIGNAL_COLORS = {
@@ -61,12 +61,12 @@ def render_price_line(state: dict[str, Any]) -> None:
     price = state.get("last_price")
     open_px = state.get("session_open_price")
     if price is None:
-        st.metric(t("metric.price"), "—")
+        st.metric(t("metric.price", symbol=state.get("symbol") or "—"), "—")
         return
     delta = None
     if open_px:
         delta = f"{((price - open_px) / open_px) * 100:.2f}%"
-    st.metric(t("metric.price"), f"{price:.2f}", delta=delta)
+    st.metric(t("metric.price", symbol=state.get("symbol") or "—"), f"{price:.2f}", delta=delta)
 
 
 def render_signal_panel(payload: dict[str, Any] | None) -> None:
@@ -217,12 +217,6 @@ def render_tf_columns(
         st.write(t("mtf.empty"))
         return
 
-    st.caption(t("mtf.caption_live"))
-    if payload and payload.get("timestamp"):
-        st.caption(t("mtf.signal_closed_at", ts=fmt_br(payload.get("timestamp"))))
-    with st.expander(t("mtf.docs_title"), expanded=False):
-        st.markdown(t("mtf.docs_body"))
-
     cols = st.columns(3)
     price_disagree = False
     _WARN = "#f59e0b"
@@ -334,15 +328,7 @@ def render_mtf_vs_footprint_note(
         )
 
 
-def render_divergence(payload: dict[str, Any] | None) -> None:
-    if not payload:
-        return
-    if payload.get("divergence_detected"):
-        msg = translate_divergence(payload.get("divergence_message"))
-        st.warning(f"{msg}\n\n{t('div.suggestion')}")
-
-
-def build_price_chart(bars: list[dict], signal_log: list[dict]) -> go.Figure:
+def build_price_chart(bars: list[dict], signal_log: list[dict], symbol: str = "—") -> go.Figure:
     if not bars:
         fig = go.Figure()
         fig.update_layout(title=t("chart.no_bars"), height=420, template="plotly_dark")
@@ -364,7 +350,7 @@ def build_price_chart(bars: list[dict], signal_log: list[dict]) -> go.Figure:
             high=df["high"],
             low=df["low"],
             close=df["close"],
-            name=t("chart.gc"),
+            name=t("chart.gc", symbol=symbol),
         ),
         row=1,
         col=1,

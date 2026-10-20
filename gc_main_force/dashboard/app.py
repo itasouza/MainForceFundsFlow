@@ -19,7 +19,6 @@ from dashboard.auth import require_login
 from dashboard.components import (
     fmt_br,
     build_price_chart,
-    render_divergence,
     render_mf_footprint_section,
     render_mtf_vs_footprint_note,
     render_price_line,
@@ -228,12 +227,15 @@ form_open = bool(
 _auto_refresh = ui_mode == "live" and not pause and not form_open
 
 
-def _tile(label: str, value: str, sub: str = "") -> str:
-    sub_html = f"<div style='font-size:.7rem;opacity:.55;margin-top:2px'>{sub}</div>" if sub else ""
+def _tile(label: str, value: str, sub: str = "", *, compact: bool = False) -> str:
+    sub_html = f"<div style='font-size:.68rem;opacity:.55;margin-top:1px'>{sub}</div>" if sub else ""
+    pad = ".28rem .45rem" if compact else ".5rem .65rem"
+    label_size = ".62rem" if compact else ".68rem"
+    value_size = ".8rem" if compact else ".95rem"
     return (
-        "<div style='background:rgba(128,128,128,.10);border-radius:10px;padding:.5rem .65rem'>"
-        f"<div style='font-size:.68rem;letter-spacing:.06em;text-transform:uppercase;opacity:.6'>{label}</div>"
-        f"<div style='font-size:.95rem;font-weight:600;margin-top:2px'>{value}</div>"
+        f"<div style='background:rgba(128,128,128,.08);border-radius:8px;padding:{pad}'>"
+        f"<div style='font-size:{label_size};letter-spacing:.06em;text-transform:uppercase;opacity:.55'>{label}</div>"
+        f"<div style='font-size:{value_size};font-weight:600;margin-top:1px'>{value}</div>"
         f"{sub_html}</div>"
     )
 
@@ -354,20 +356,20 @@ def _render_dashboard() -> None:
         else f"<span style='color:#16a34a'>{t('no')}</span>"
     )
     session_name = session_label(state.get("active_session")) if state.get("active_session") else "—"
-    tiles = "".join(
-        [
-            _tile(t("tile.price"), px_html),
-            _tile(t("tile.session"), session_name, t("ticks_n", n=state.get("tick_count", 0))),
-            _tile(t("tile.regime"), regime_txt, t("source_line", source=source_label(regime.get("source", "—")))),
-            _tile(t("tile.paused"), grid_html, t("mf_floor", n=thr.get("mf_fixed_threshold_contracts", "—"))),
-        ]
-    )
-    ts = f" · {fmt_br(latest.get('timestamp'))} ({t('brasilia')})" if latest else ""
     symbol = (
         state.get("symbol")
         or (latest or {}).get("symbol")
         or "—"
     )
+    tiles = "".join(
+        [
+            _tile(t("tile.price", symbol=symbol), px_html, compact=True),
+            _tile(t("tile.session"), session_name, t("ticks_n", n=state.get("tick_count", 0)), compact=True),
+            _tile(t("tile.regime"), regime_txt, t("source_line", source=source_label(regime.get("source", "—"))), compact=True),
+            _tile(t("tile.paused"), grid_html, t("mf_floor", n=thr.get("mf_fixed_threshold_contracts", "—")), compact=True),
+        ]
+    )
+    ts = f" · {fmt_br(latest.get('timestamp'))} ({t('brasilia')})" if latest else ""
     feed = state.get("tick_source") or ""
     feed_txt = f" · {feed}" if feed else ""
 
@@ -399,15 +401,72 @@ def _render_dashboard() -> None:
         st.error(t("alert.engine_down", age=age_txt))
     elif tape_stopped:
         st.warning(t("alert.tape_stopped", age=format_age(ticks_quiet)))
-    tiles_col, limits_col, trade_col = st.columns([4.2, 1.05, 1.55], vertical_alignment="center")
+    foreign_n = int(state.get("foreign_tick_count") or 0)
+    if ui_mode == "live" and foreign_n > 0:
+        foreign_px = state.get("last_foreign_price")
+        px_txt = f"{float(foreign_px):,.2f}" if foreign_px is not None else "—"
+        st.warning(t("alert.mixed_tape", n=foreign_n, price=px_txt))
+    render_contextual_alerts(mentor)
+
+    st.markdown(
+        f"<div style='font-size:1.45rem;font-weight:750;margin:.1rem 0 .15rem'>{t('mtf.title')}</div>",
+        unsafe_allow_html=True,
+    )
+    render_tf_columns(
+        latest,
+        live_mtf=state.get("mtf_live"),
+        bars_10m=list(state.get("bars_10m") or []),
+        last_price=float(state["last_price"]) if state.get("last_price") is not None else None,
+    )
+
+    fp_bundle = None
+    if show_footprint:
+        fp_bundle = state.get("institutional_footprint")
+        if not fp_bundle or not any(
+            (fp_bundle.get(tf) or {}).get("price_levels") for tf in ("10m", "30m", "1H")
+        ):
+            if latest and latest.get("institutional_footprint"):
+                fp_bundle = latest.get("institutional_footprint")
+        render_mtf_vs_footprint_note(latest, fp_bundle, live_mtf=state.get("mtf_live"))
+        footprint_tf = st.pills(
+            t("fp.timeframe"),
+            ["10m", "30m", "1H", "10m + 30m + 1H"],
+            default="10m + 30m + 1H",
+            selection_mode="single",
+            key="fp_tf_view",
+        ) or "10m + 30m + 1H"
+        if footprint_tf == "10m + 30m + 1H":
+            for col, tf in zip(st.columns(3, gap="small"), ("10m", "30m", "1H")):
+                with col:
+                    render_mf_footprint_section(
+                        fp_bundle,
+                        selected_tf=tf,
+                        footprint_meta=state.get("footprint_meta"),
+                        ninja_price=state.get("last_price"),
+                        compact=True,
+                    )
+        else:
+            render_mf_footprint_section(
+                fp_bundle,
+                selected_tf=footprint_tf,
+                footprint_meta=state.get("footprint_meta"),
+                ninja_price=state.get("last_price"),
+            )
+
+    with st.expander(t("mtf.docs_title"), expanded=False):
+        st.markdown(t("mtf.docs_body"))
+        if latest and latest.get("timestamp"):
+            st.caption(t("mtf.signal_closed_at", ts=fmt_br(latest.get("timestamp"))))
+
+    tiles_col, limits_col, trade_col = st.columns([4.2, 1.05, 1.35], vertical_alignment="center")
     with tiles_col:
         st.markdown(
-            "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:.5rem'>"
+            "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:.35rem'>"
             f"{tiles}</div>",
             unsafe_allow_html=True,
         )
     with limits_col:
-        st.markdown(_tile(t("tile.thresholds"), thr_txt), unsafe_allow_html=True)
+        st.markdown(_tile(t("tile.thresholds"), thr_txt, compact=True), unsafe_allow_html=True)
     with trade_col:
         open_trade_button(memory["trades"])
     render_trade_form(_ROOT, state)
@@ -416,64 +475,14 @@ def _render_dashboard() -> None:
         st.info(t("info.waiting_close"))
     if not state.get("live") and (state.get("tick_count") or 0) == 0:
         st.warning(t("warn.no_ticks"))
-    render_contextual_alerts(mentor)
-    render_divergence(latest)
 
-    # ---------- Abas ----------
-    tab_op, tab_chart, tab_log, tab_mentor = st.tabs(
-        [t("tab.op"), t("tab.chart"), t("tab.log"), t("tab.mentor")]
+    tab_chart, tab_log, tab_mentor = st.tabs(
+        [t("tab.chart"), t("tab.log"), t("tab.mentor")]
     )
 
-    fp_bundle = None
-    if show_footprint:
-        # Live heartbeat prefers open-bar map; fall back to latest signal payload
-        fp_bundle = state.get("institutional_footprint")
-        if not fp_bundle or not any(
-            (fp_bundle.get(tf) or {}).get("price_levels") for tf in ("10m", "30m", "1H")
-        ):
-            if latest and latest.get("institutional_footprint"):
-                fp_bundle = latest.get("institutional_footprint")
-
-    with tab_op:
-        st.subheader(t("mtf.title"))
-        render_tf_columns(
-            latest,
-            live_mtf=state.get("mtf_live"),
-            bars_10m=list(state.get("bars_10m") or []),
-            last_price=float(state["last_price"]) if state.get("last_price") is not None else None,
-        )
-        if show_footprint:
-            render_mtf_vs_footprint_note(latest, fp_bundle, live_mtf=state.get("mtf_live"))
-            st.markdown("<div style='height:2rem'></div>", unsafe_allow_html=True)
-            footprint_tf = st.pills(
-                t("fp.timeframe"),
-                ["10m", "30m", "1H", "10m + 30m + 1H"],
-                default="10m",
-                selection_mode="single",
-                key="fp_tf",
-            ) or "10m"
-            if footprint_tf == "10m + 30m + 1H":
-                # 3 footprints lado a lado (mesma ordem dos cartões MTF)
-                for col, tf in zip(st.columns(3, gap="small"), ("10m", "30m", "1H")):
-                    with col:
-                        render_mf_footprint_section(
-                            fp_bundle,
-                            selected_tf=tf,
-                            footprint_meta=state.get("footprint_meta"),
-                            ninja_price=state.get("last_price"),
-                            compact=True,
-                        )
-            else:
-                render_mf_footprint_section(
-                    fp_bundle,
-                    selected_tf=footprint_tf,
-                    footprint_meta=state.get("footprint_meta"),
-                    ninja_price=state.get("last_price"),
-                )
-
     with tab_chart:
-        st.subheader(t("chart.title"))
-        fig = build_price_chart(list(state.get("bars_10m") or []), log)
+        st.subheader(t("chart.title", symbol=symbol))
+        fig = build_price_chart(list(state.get("bars_10m") or []), log, symbol=symbol)
         fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig, use_container_width=True)
 

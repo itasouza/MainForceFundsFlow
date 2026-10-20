@@ -7,7 +7,7 @@ from typing import Any
 import streamlit as st
 
 from dashboard.components import _price_candle_side, enrich_mtf_ohlc
-from dashboard.i18n import t
+from dashboard.i18n import t, translate_divergence
 from dashboard.playbook import (
     ABSORPTION_NEAR_TICKS,
     OFF_SESSIONS,
@@ -245,6 +245,7 @@ def market_context(
         )
     return {
         "divergence": bool(latest and latest.get("divergence_detected")),
+        "divergence_message": (latest or {}).get("divergence_message"),
         "neutral": is_neutral,
         "signal": signal,
         "diagnosis": diagnosis,
@@ -297,113 +298,68 @@ def badge_html(rule: dict) -> str:
     )
 
 
-def _neutral_alert_text(ctx: dict[str, Any]) -> tuple[str, str]:
-    """Title + message for rule #6, nuanced when short TFs already lean one way."""
+def _direction_word(side: str | None) -> str:
+    return t("side.buy") if side == "buy" else t("side.sell")
+
+
+def _decision(ctx: dict[str, Any]) -> tuple[str, str] | None:
+    """One sentence: the action that matters right now."""
+    trigger = primary_rule(ctx)["trigger"]
     diag = ctx.get("diagnosis") or {}
     reason = diag.get("reason")
+    partial = diag.get("partial") or "buy"
+    direction = _direction_word(partial)
     sides = diag.get("sides") or {}
 
-    def _label(side: str) -> str:
-        if side == "buy":
-            return t("side.buy")
-        if side == "sell":
-            return t("side.sell")
-        return "—"
-
-    side_txt = (
-        f"10m={_label(sides.get('10m', 'flat'))} · "
-        f"30m={_label(sides.get('30m', 'flat'))} · "
-        f"1H={_label(sides.get('1H', 'flat'))}"
-    )
+    if trigger == "off_session":
+        return "warning", t("alert.now.session")
+    if trigger == "live_aligned_bias":
+        return "success", t("alert.now.live", direction=direction)
+    if trigger == "divergence_detected":
+        return "warning", translate_divergence(ctx.get("divergence_message"))
+    if trigger == "price_near_absorption" and ctx.get("absorption_level") is not None:
+        return "info", t(
+            "alert.now.abs",
+            ticks=f"{float(ctx['distance_ticks']):.0f}",
+            level=f"{float(ctx['absorption_level']):.2f}",
+        )
+    if trigger == "in_position":
+        return "info", t("alert.now.pos")
+    if trigger != "neutral_signal":
+        return None
     if reason == "awaiting_first_close":
-        return t("alert.wait_close_title"), t("alert.wait_close_msg")
-    if reason == "live_aligned_wait_close":
-        partial = diag.get("partial") or "buy"
-        direction = t("side.buy") if partial == "buy" else t("side.sell")
-        return (
-            t("alert.wait_live_title"),
-            t("alert.wait_live_msg", direction=direction, sides=side_txt),
-        )
+        return "warning", t("alert.now.wait_close")
     if reason == "mf_vs_price":
-        partial = diag.get("partial") or "buy"
-        direction = t("side.buy") if partial == "buy" else t("side.sell")
-        px = diag.get("price_sides") or {}
-
-        def _px(side: str) -> str:
-            if side == "buy":
-                return t("mtf.price_up")
-            if side == "sell":
-                return t("mtf.price_down")
-            return "—"
-
-        px_txt = (
-            f"10m={_px(px.get('10m', 'flat'))} · "
-            f"30m={_px(px.get('30m', 'flat'))} · "
-            f"1H={_px(px.get('1H', 'flat'))}"
-        )
-        return (
-            t("alert.mf_vs_price_title"),
-            t(
-                "alert.mf_vs_price_msg",
-                direction=direction,
-                sides=side_txt,
-                price=px_txt,
-            ),
-        )
+        return "warning", t("alert.now.mf_price", direction=direction)
     if reason == "awaiting_1h":
-        partial = diag.get("partial") or "buy"
-        direction = t("side.buy") if partial == "buy" else t("side.sell")
-        return (
-            t("alert.wait_1h_title"),
-            t("alert.wait_1h_msg", direction=direction, sides=side_txt),
-        )
+        return "warning", t("alert.now.wait_1h", direction=direction)
     if reason == "awaiting_lower_tf":
-        partial = diag.get("partial") or "buy"
-        direction = t("side.buy") if partial == "buy" else t("side.sell")
-        return (
-            t("alert.wait_lower_title"),
-            t("alert.wait_lower_msg", direction=direction, sides=side_txt),
+        cards_agree = (
+            sides.get("10m") == sides.get("30m") == sides.get("1H") == partial
         )
+        key = "alert.now.wait_cards" if cards_agree else "alert.now.wait_lower"
+        return "warning", t(key, direction=direction)
     if reason == "mixed":
-        return t("alert.flat_title"), t("alert.mixed_msg", sides=side_txt)
-    return t("alert.flat_title"), t("alert.flat_msg", sides=side_txt)
+        return "error", t("alert.now.mixed")
+    return "error", t("alert.now.flat")
 
 
 def render_contextual_alerts(ctx: dict[str, Any]) -> None:
-    if ctx["neutral"]:
-        title, msg = _neutral_alert_text(ctx)
-        reason = (ctx.get("diagnosis") or {}).get("reason")
-        # Live MF aligned → actionable early bias (green). Partial → amber. Flat/mixed → red.
-        if reason == "live_aligned_wait_close":
-            st.success(f"⚡ **{title}** — {msg}")
-        elif reason == "mf_vs_price":
-            st.warning(f"⚠️ **{title}** — {msg}")
-        elif reason in ("awaiting_1h", "awaiting_lower_tf", "awaiting_first_close"):
-            st.warning(f"⏳ **{title}** — {msg}")
-        else:
-            st.error(f"⛔ **{title}** — {msg}")
-        abs_vol = float(ctx.get("absorption_volume") or 0.0)
-        if abs_vol != 0 and reason == "awaiting_1h":
-            st.caption(t("alert.fp_vs_signal"))
-        elif abs_vol != 0 and reason == "live_aligned_wait_close":
-            st.caption(t("alert.fp_early_entry"))
-    if ctx["off_session"]:
-        st.warning(f"🕐 **{t('alert.session_title')}** — {t('alert.session_msg')}")
-    if ctx["divergence"]:
-        st.warning(f"⚠️ **{t('alert.div_title')}** — {t('alert.div_msg')}")
-    if ctx["near_absorption"] and ctx["absorption_level"] is not None and ctx["distance_ticks"] is not None:
-        st.info(
-            "🎯 **"
-            + t("alert.abs_title")
-            + "** — "
-            + t(
-                "alert.abs_msg",
-                ticks=f"{ctx['distance_ticks']:.0f}",
-                level=f"{float(ctx['absorption_level']):.2f}",
-            )
-        )
-    if ctx["in_position"]:
-        st.info(f"🚪 **{t('alert.pos_title')}** — {t('alert.pos_msg')}")
+    decision = _decision(ctx)
+    if decision is None:
+        return
+    kind, text = decision
+    if kind == "success":
+        st.success(text)
+    elif kind == "error":
+        st.error(text)
+    elif kind == "info":
+        st.info(text)
+    else:
+        st.warning(text)
+    # The exit of a trade already open is the only extra fact on this screen.
+    if ctx["in_position"] and primary_rule(ctx)["trigger"] != "in_position":
+        st.caption(t("alert.note.pos"))
 
 
 def render_playbook(ctx: dict[str, Any]) -> None:
